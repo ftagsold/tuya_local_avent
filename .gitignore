@@ -1,0 +1,40 @@
+# Secrets — never commit. docker-compose.yml holds real keys; commit the example.
+docker-compose.yml
+/data/
+
+# Rust
+/target/
+
+# Go bridge build output
+/bridge/avent-webrtc-bridge
+/bridge/bridge
+
+# Frida tooling (venv + large server binary)
+tools/frida/venv*/
+tools/frida/frida-server-*
+
+# Logs / scratch
+*.log
+
+# Go bridge runtime state
+bridge/.tuya-data/
+
+# go2rtc binary for local runs (tools/run-local.sh)
+tools/go2rtc/
+
+# Go bridge state if run from the repo root
+/.tuya-data/
+
+# Prebuilt Go bridge binaries
+/bridge/avent-webrtc-bridge-*
+
+# Self-signed certs/keys (mediamtx leftovers)
+*.key
+*.crt
+*.pem
+
+# macOS
+.DS_Store
+
+# Card harness runtime (go2rtc config holds the RTSP credential)
+/tools/card-harness/work/

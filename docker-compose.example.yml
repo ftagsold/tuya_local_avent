@@ -1,0 +1,56 @@
+# Committed template. Copy to docker-compose.yml (gitignored) and fill in
+# secrets. One container: the Rust tuya_local_avent supervises the Go video bridge
+# (loopback only), the ffmpeg overlay relay and go2rtc (the only LAN-facing
+# RTSP server, password required; talkback backchannel). Needs its own
+# MAC/IP for UniFi Protect discovery, so it runs on a macvlan network.
+
+services:
+  tuya_local_avent:
+    image: ghcr.io/ftagsold/tuya_local_avent:latest   # amd64, tuned for Zen 4
+    # build: .                       # or build locally (see Dockerfile header)
+    container_name: tuya_local_avent
+    restart: unless-stopped
+    init: true                     # reap ffmpeg/go2rtc children
+    # Own MAC/IP so UniFi Protect discovers the ONVIF camera. Create the
+    # network first (adjust parent + subnet to your LAN):
+    #   docker network create -d macvlan \
+    #     --subnet=192.168.1.0/24 --gateway=192.168.1.1 \
+    #     -o parent=eth0 tuya-local-avent
+    networks:
+      tuya-local-avent:
+        ipv4_address: 192.168.1.90
+    volumes:
+      - ./data:/data               # bridge.json, cloud.json cache, go2rtc.yaml (all 0600)
+    environment:
+      TZ: Europe/Berlin            # overlay clock timezone
+      # --- device ---
+      AVENT_DEVICE_ID: CHANGEME
+      AVENT_LOCAL_KEY: "CHANGEME"
+      AVENT_P2P_PASSWORD: "CHANGEME"             # skips the cloud login; cloud only if rejected
+      AVENT_CAMERA_NAME: Monitor          # overlay/HA/ONVIF name; unset = app name from cloud
+      # --- cloud fallback (only used when AVENT_P2P_PASSWORD is rejected) ---
+      AVENT_EMAIL: you@example.com
+      AVENT_PASSWORD: CHANGEME
+      AVENT_REGION: eu
+      AVENT_COUNTRY_CODE: "49"
+      AVENT_APP_KEY: CHANGEME_from_apk
+      AVENT_SIGNING_KEY: CHANGEME_from_tools_frida
+      AVENT_CH_KEY: CHANGEME_from_tools_frida
+      # --- Home Assistant (MQTT discovery; broker requires login) ---
+      MQTT_HOST: 192.168.1.10
+      MQTT_PORT: "1883"
+      MQTT_USER: CHANGEME
+      MQTT_PASS: CHANGEME
+      # --- UniFi Protect / HA ONVIF ---
+      ONVIF_USER: "avent"
+      ONVIF_PASS: CHANGEME_long_random
+      ONVIF_PORT: "8000"
+      ONVIF_BIND_IP: 192.168.1.90   # must equal this container's macvlan ipv4_address
+      # --- RTSP (go2rtc, always authenticated off loopback) ---
+      RTSP_PORT: "8554"
+      RTSP_USER: "avent"
+      RTSP_PASS: CHANGEME_long_random
+
+networks:
+  tuya-local-avent:
+    external: true

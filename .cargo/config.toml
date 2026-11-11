@@ -1,0 +1,4 @@
+[build]
+# Use every instruction the build host supports. This ties the binary to the
+# build CPU's architecture; build on (or for) the machine that will run it.
+rustflags = ["-C", "target-cpu=native"]

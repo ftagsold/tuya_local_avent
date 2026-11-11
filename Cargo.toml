@@ -1,0 +1,49 @@
+[package]
+name = "tuya_local_avent"
+version = "0.1.0"
+edition = "2021"
+description = "Local bridge from a Philips Avent (Tuya) baby monitor to Home Assistant and UniFi Protect"
+license = "MIT"
+
+[[bin]]
+name = "tuya_local_avent"
+path = "src/main.rs"
+
+[dependencies]
+aes = "0.8.4"
+aes-gcm = "0.10.3"
+cbc = "0.1.2"
+ecb = "0.1.2"
+cipher = { version = "0.4.4", features = ["block-padding", "alloc"] }
+md-5 = "0.10.6"
+crc32fast = "1.4.2"
+rand = "0.9.2"
+socket2 = { version = "0.6.1", features = ["all"] }
+reqwest = { version = "0.12.24", default-features = false, features = ["json", "cookies", "rustls-tls"] }
+rsa = { version = "0.9.8", features = ["pem", "std", "getrandom"] }
+hex = "0.4.3"
+uuid = { version = "1.18.1", features = ["v4"] }
+hmac = "0.12.1"
+sha2 = "0.10.9"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+clap = { version = "4.5.51", features = ["derive", "env"] }
+anyhow = "1.0.100"
+thiserror = "2.0.17"
+tokio = { version = "1.49.0", features = ["rt-multi-thread", "macros", "net", "time", "io-util", "sync", "process", "signal"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+rumqttc = "0.24.0"
+sha1 = "0.10.6"
+base64 = "0.22.1"
+
+# Max-performance release build. target-cpu=native set in .cargo/config.toml.
+# panic stays "unwind": the service supervises tasks in-process; aborting the
+# whole process on one task panic would kill the restart logic.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+overflow-checks = false
+incremental = false

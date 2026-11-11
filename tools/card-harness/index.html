@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Card Harness</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@mdi/font@7.4.47/css/materialdesignicons.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/js-yaml/4.1.0/js-yaml.min.js"></script>
+<style>
+  :root {
+    --primary-color: #03a9f4; --text-primary-color: #fff; --error-color: #db4437;
+    --primary-text-color: #212121; --secondary-text-color: #727272; --divider-color: rgba(0,0,0,.12);
+    --card-background-color: #fff; --bg: #f0f2f5; --panel: #fff;
+  }
+  :root[data-theme="dark"] {
+    --primary-text-color: #e1e1e1; --secondary-text-color: #9b9b9b; --divider-color: rgba(225,225,225,.12);
+    --card-background-color: #1c1c1c; --bg: #111; --panel: #1c1c1c;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.4 system-ui, sans-serif; background: var(--bg); color: var(--primary-text-color); }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 10px 16px;
+    border-bottom: 1px solid var(--divider-color); background: var(--panel); }
+  header h1 { font-size: 16px; margin: 0 8px 0 0; }
+  header label { display: flex; gap: 6px; align-items: center; }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) 420px; gap: 16px; padding: 16px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  #stage { justify-self: center; width: 100%; }
+  .panel { background: var(--panel); border: 1px solid var(--divider-color); border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+  .panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; margin: 0 0 8px; color: var(--secondary-text-color); }
+  textarea { width: 100%; font: 12px/1.4 ui-monospace, monospace; background: var(--bg); color: inherit;
+    border: 1px solid var(--divider-color); border-radius: 6px; padding: 8px; }
+  #config { min-height: 260px; }
+  button, select, input { font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--divider-color);
+    border-radius: 6px; padding: 4px 8px; }
+  button { cursor: pointer; }
+  .err { color: var(--error-color); white-space: pre-wrap; font-size: 12px; }
+  .ent { display: grid; grid-template-columns: 1fr 110px 70px; gap: 6px; align-items: center; margin: 4px 0; font-size: 12px; }
+  .ent code { overflow: hidden; text-overflow: ellipsis; }
+  #log { font: 11px/1.4 ui-monospace, monospace; max-height: 220px; overflow: auto; white-space: pre-wrap; margin: 0; }
+  #editor-host { margin-top: 8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>tuya-local-avent-card harness</h1>
+  <label>Width <select id="width">
+    <option value="360px">phone 360</option><option value="500px" selected>500</option>
+    <option value="800px">800</option><option value="100%">full</option></select></label>
+  <label><input type="checkbox" id="dark"> dark</label>
+  <label><input type="checkbox" id="nowebrtc"> no WebRTC (MJPEG fallback)</label>
+  <span id="status" style="color:var(--secondary-text-color)"></span>
+</header>
+<main>
+  <div id="stage"></div>
+  <aside>
+    <div class="panel">
+      <h2>Card config (YAML)</h2>
+      <textarea id="config" spellcheck="false"></textarea>
+      <div style="display:flex;gap:8px;margin-top:6px">
+        <button id="apply">Apply</button>
+        <button id="toggle-editor">Visual editor</button>
+      </div>
+      <div class="err" id="config-err"></div>
+      <div id="editor-host" hidden></div>
+    </div>
+    <div class="panel">
+      <h2>Mock entities</h2>
+      <div id="entities"></div>
+    </div>
+    <div class="panel">
+      <h2>Service calls / WS</h2>
+      <pre id="log"></pre>
+    </div>
+  </aside>
+</main>
+<script type="module" src="/harness.js"></script>
+</body>
+</html>

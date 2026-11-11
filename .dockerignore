@@ -1,0 +1,15 @@
+*.crt
+*.key
+*.log
+.git/
+.tuya-data/
+bridge/.tuya-data/
+bridge/avent-webrtc-bridge
+bridge/avent-webrtc-bridge-*
+card/
+data/
+docker-compose.yml
+target/
+tools/
+tools/frida/frida-server-*
+tools/frida/venv*/

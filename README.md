@@ -1,0 +1,284 @@
+# tuya_local_avent
+
+A single Rust process (plus a vendored Go video bridge) that turns a **Philips
+Avent / Tuya baby monitor** into:
+
+- a **Home Assistant** device — night light (dimmable), lullaby, volume,
+  temperature, motion/sound alerts, privacy — over local MQTT discovery,
+- a **Lovelace card** (`card/tuya-local-avent-card.js`) with live video, talk,
+  night light, lullaby and entity overlays, and
+- an **ONVIF Profile S camera** that **UniFi Protect** can adopt, fed by a
+  local RTSP stream.
+
+Everything at runtime is **local**: control and video go straight to the
+monitor over your LAN. With `AVENT_P2P_PASSWORD` set the cloud is never
+touched; the bridge logs in only if the monitor rejects that password.
+
+## Status
+
+| Capability | State |
+|---|---|
+| Local 3.3 LAN session, control + sensor pushes | built |
+| Fully-local video (3.3 LAN signalling) | **working** — `h264 1280x720`, no cloud |
+| Overlay `dd-mm-yyyy hh:mm:ss \| <name>`, H.264 + AAC | **working** |
+| Authenticated RTSP (go2rtc), no open stream | **working** |
+| Talkback (monitor speaker) over the LAN | **working** end to end via HA's go2rtc (tested with a silent mic; audibility not yet checked) |
+| P2P password from env, cloud fallback on rejection | **working** |
+| ONVIF Profile S + snapshot for UniFi Protect / HA | working (adopted by Protect) |
+| Home Assistant control via MQTT discovery | built; needs broker credentials |
+| Lovelace card (video, talk, night light, lullaby, overlays) | built (`card/`) |
+
+## How it works
+
+```
+ ┌────────────────── tuya_local_avent (one container, macvlan) ───────────────────┐
+ │ Go bridge ──RTSP, 127.0.0.1:38554, random creds──▶ ffmpeg                        │
+ │   (LAN video from the monitor)                     overlay: clock | name        │
+ │      ▲ talk (backchannel, PCMU)                    H.264 + AAC                  │
+ │      │                                               │ publish, loopback only   │
+ │      │                                               ▼                          │
+ │      └──────────────────────────────────────── go2rtc :8554  ◀── Protect / HA   │
+ │ ONVIF :8000 ─ stream/snapshot URI ─────────▶  (RTSP_USER/RTSP_PASS required)    │
+ │ LAN control (TCP 6668, 3.3) ── MQTT ──▶ Home Assistant                          │
+ └─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+- The only RTSP port on the LAN is go2rtc's `8554` (TCP), and every
+  connection that is not from loopback needs `RTSP_USER`/`RTSP_PASS`. The Go
+  bridge listens on loopback with a per-start random credential. go2rtc runs
+  only its `api` (bound to `127.0.0.1`) and `rtsp` modules: no WebRTC, RTMP,
+  SRTP, exec or ffmpeg sources. Anyone holding the RTSP credential could also
+  push into the stream, so treat it like a camera admin password.
+- **Talkback.** The monitor's speaker is reached over the same LAN session
+  as the video (`bridge/pkg/lan/talk.go`, reverse-engineered from the Tuya
+  Smart app with `tools/frida/talk_capture.js`). go2rtc carries an RTSP
+  backchannel to it: a viewer opening `…/<name>?backchannel=1` (the ONVIF
+  stream URI) can send
+  G.711 audio, which the Go bridge resamples to 16 kHz PCM and sends as talk
+  messages. The talk opens on the first packet and closes after 1 s of
+  silence, so watching never opens the speaker. Open/close go on the KCP
+  control conversation (0); the audio goes on the monitor's audio
+  conversation (2), as the app does. Audio on conv 0 crashes the monitor.
+- The monitor sends G.711 µ-law audio, which UniFi Protect does not play. The
+  relay re-encodes it to AAC-LC (48 kHz mono; ≤ 24 kHz AAC is misread as
+  HE-AAC by VLC and others), and the ONVIF profile advertises it.
+- Video is re-encoded (for the overlay) the way the camera sends it: one
+  slice per frame, SPS/PPS before every keyframe, no B-frames, 2 s GOP,
+  25 fps. x264's `zerolatency` tune splits frames into many slices, which
+  Protect and VLC fail to play.
+- ONVIF hands out the stream URI with credentials, and the snapshot URI with
+  its access token, only for requests that carry a valid WS-Security token.
+  `/snapshot` otherwise requires HTTP Basic with the ONVIF credentials.
+
+The monitor speaks Tuya LAN **protocol 3.3**. It will answer a LAN video offer
+(so video is local) only when the offer is sent without the 3.3 version header
+and over a session primed with `DP_QUERY` — a path the vendored Go bridge was
+patched to take (`bridge/pkg/lan`). The media login is
+`md5(p2p_password‖localKey)`.
+
+### Self-healing
+
+Everything restarts itself; nothing needs a container restart.
+
+| failure | detected by | action |
+|---|---|---|
+| relay input dead (bridge gone, socket stalled) | ffmpeg `-timeout 10s` | relay restarts (1 s → 30 s backoff) |
+| relay running but no new frames | `-progress` watchdog, 20 s | relay killed and restarted |
+| no video for 60 s | health loop | Go bridge restarted, monitor IP re-discovered |
+| still no video after 3 bridge restarts | health loop | P2P password re-fetched from the cloud |
+| monitor changed IP | discovery during recovery | bridge and LAN control follow the new IP |
+| LAN control half-open | 3 missed heartbeats | session reconnects |
+| MQTT broker restart | reconnect | discovery, availability and subscriptions re-sent |
+| go2rtc / Go bridge crash | supervisor | restarted (≈10 s to video) |
+| monitor off at boot | discovery | retried every 30 s instead of exiting |
+
+Resource bounds: ONVIF serves at most 32 connections, each closed after
+20 s; snapshots are single-flight and cached for 3 s, so polling clients
+share one ffmpeg; every child process (bridge, go2rtc, relay, snapshot,
+probe) is killed with its owner, so none outlive a restart.
+
+### P2P password
+
+1. `AVENT_P2P_PASSWORD` is used as is, no login.
+2. The bridge waits for real video from the monitor (up to ~90 s).
+3. No video: it logs in (`AVENT_EMAIL`/`AVENT_PASSWORD` + app keys), fetches
+   the current password, caches it in `/data/cloud.json` and restarts the video
+   bridge. A rejected env value is remembered, so later starts use the cached
+   one until you update the env.
+
+Without `AVENT_P2P_PASSWORD` the cached value is tried first, then the cloud.
+`tuya_local_avent fetch-password` prints whether a password exists and writes it
+to `data/bridge.json` (`cameras[0].p2p_password`).
+
+## Configuration (env)
+
+Required:
+
+| var | meaning |
+|---|---|
+| `AVENT_DEVICE_ID`, `AVENT_LOCAL_KEY` | the monitor's Tuya id + local key |
+| `AVENT_P2P_PASSWORD` | the monitor's P2P password, **or** the cloud vars below |
+| `ONVIF_PASS` | ONVIF password (≥ 8 chars; also the RTSP password by default) |
+
+Cloud fallback (needed if `AVENT_P2P_PASSWORD` is unset or rejected):
+`AVENT_EMAIL`, `AVENT_PASSWORD`, `AVENT_APP_KEY`, `AVENT_SIGNING_KEY`,
+`AVENT_CH_KEY`.
+
+Optional:
+
+| var | default |
+|---|---|
+| `AVENT_CAMERA_NAME` | app name from the last cloud fetch, else `Monitor` |
+| `AVENT_REGION` / `AVENT_COUNTRY_CODE` | `eu` / `49` |
+| `AVENT_LAN_IP` | auto-discovered (set to skip discovery) |
+| `MQTT_HOST` / `MQTT_PORT` / `MQTT_USER` / `MQTT_PASS` | — / 1883 / — / — (unset `MQTT_HOST` disables HA control) |
+| `ONVIF_USER` / `ONVIF_PORT` / `ONVIF_BIND_IP` | `avent` / 8000 / auto |
+| `RTSP_USER` / `RTSP_PASS` | `ONVIF_USER` / `ONVIF_PASS` |
+| `RTSP_PORT` | `8554` (TCP) |
+| `TZ` | UTC (overlay clock timezone, e.g. `Europe/Berlin`) |
+| `AVENT_OVERLAY_FONT` | `/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf` |
+| `AVENT_DATA` | `/data` |
+| `RUST_LOG` | `info` |
+
+The bridge refuses to start with an `ONVIF_PASS`/`RTSP_PASS` shorter than 8
+characters or equal to `CHANGEME`.
+
+### Getting the app signing values
+
+`AVENT_APP_KEY`, `AVENT_SIGNING_KEY` and `AVENT_CH_KEY` are
+constants of the Tuya Smart Android app — shared by all users, stable until
+Tuya re-signs the app. They are not account secrets, but this repo does not
+ship them: keep them in `docker-compose.yml` (gitignored). `tools/frida/`
+extracts them: `dump.py` reads the assembled signing key from the running
+app's memory, and `bypass_capture.js` captures the signed base params of a
+real request (`chKey` is the channel key; `ttid=international`). See the
+comments in each script.
+
+## Run
+
+The container needs its **own MAC/IP** so UniFi Protect discovers it, so run it
+on a Docker **macvlan** network:
+
+```sh
+docker network create -d macvlan \
+  --subnet=192.168.1.0/24 --gateway=192.168.1.1 \
+  -o parent=eth0 tuya-local-avent
+
+cp docker-compose.example.yml docker-compose.yml   # then fill in secrets
+docker compose up -d --build
+```
+
+Set `ONVIF_BIND_IP` to the container's `ipv4_address`.
+
+- **Home Assistant control**: set `MQTT_HOST` and the broker's
+  `MQTT_USER`/`MQTT_PASS` (the Mosquitto add-on refuses anonymous clients);
+  the entities appear via MQTT discovery. Use the broker's IP: `.local` names
+  do not resolve inside the container. The night light is one dimmable light
+  (`light.turn_on` with `brightness_pct`).
+- **Home Assistant video + talk**: add the *ONVIF* integration with the
+  container IP, port `8000` and the ONVIF credentials. It creates one camera;
+  its stream URI carries the talkback backchannel, which HA's built-in go2rtc
+  forwards from the browser microphone. Clients that do not talk ignore the
+  extra track. The bridge's MQTT device and the ONVIF camera share a MAC, so
+  HA shows them as one device.
+- **Lovelace card**: see [Card](#card).
+- **UniFi Protect**: *Settings → Cameras → Add → Third-party (ONVIF)*; it should
+  discover the camera, or add it by IP with the `ONVIF_USER`/`ONVIF_PASS`
+  credentials.
+
+## Card
+
+`card/tuya-local-avent-card.js` is a dependency-free Lovelace card:
+
+- **Video + listen audio** from the ONVIF camera entity over Home
+  Assistant's own WebRTC (built-in go2rtc). No transcoding in the card.
+- **Talk**: the browser microphone on a send-only track of the same WebRTC
+  session, with a talk volume (gain, 0-200 %, remembered per browser). Tap to
+  start/stop, or `talk_mode: hold`. Needs HA over HTTPS (browsers grant the
+  microphone only to secure pages).
+- **Controls**: a button group floating at the bottom center of the video:
+  listen, night light, lullaby, talk (each optional). Tapping one turns the
+  group into that control: an on/off toggle on the left and its slider
+  (listen volume, night light 33/66/100 %, lullaby volume, talk volume). A
+  tap anywhere outside the group (or Esc) goes back to the buttons. The MQTT
+  entities are found on the camera's device; set them explicitly if HA did
+  not merge the devices.
+- **Overlays**: other entities' states as transparent HTML text over the
+  video, at a named position or at explicit `top/left/right/bottom`.
+
+Install: copy the file to `/config/www/`, then *Settings → Dashboards → ⋮ →
+Resources → Add* `/local/tuya-local-avent-card.js` (JavaScript module). The
+card has a visual editor; YAML:
+
+```yaml
+type: custom:tuya-local-avent-card
+camera: camera.nursery
+title: Nursery                 # optional
+controls: [listen, night_light, lullaby, talk]
+talk_mode: toggle            # or hold
+# night_light: light.nursery_night_light   # optional overrides
+# lullaby: select.nursery_lullaby
+# volume: number.nursery_volume
+overlays:
+  - entity: sensor.nursery_temperature
+    position: top-right      # top-left|top-center|top-right|center-left|center|
+                             # center-right|bottom-left|bottom-center|bottom-right
+  - entity: binary_sensor.nursery_motion
+    name: Motion             # label; `name: true` = friendly name
+    position: bottom-left
+  - entity: sensor.nursery_humidity
+    top: 12                  # number = %, string = any CSS length
+    left: 3
+    style: "font-size: 20px; color: #ffd54f"
+  - entity: sensor.nursery_temperature
+    attribute: unit_of_measurement   # show an attribute instead of the state
+    text: "Temp unit: {state}"       # template around the value
+```
+
+### Testing the card without Home Assistant
+
+`tools/card-harness/run.sh` runs the real card in your browser against a fake
+`hass`. A local go2rtc plays the part of Home Assistant's built-in go2rtc, so
+video, listen audio and talk are real; the night light, lullaby, volume and
+overlay entities are mocks you can edit in the side panel.
+
+```sh
+tools/run-local.sh                 # the bridge (other terminal)
+tools/card-harness/run.sh          # then open http://localhost:8125/
+tools/card-harness/run.sh --fake   # test pattern, no bridge needed (no talk)
+```
+
+Use `localhost`, not the LAN IP: browsers only grant the microphone to secure
+pages. The card file is re-read on every reload. The page also has the card's
+visual editor, a dark theme, card widths and an MJPEG-fallback switch.
+
+## Known issues
+
+- go2rtc's RTSP server is TCP only: RTSP clients forced to UDP fail.
+
+## Diagnostic subcommands
+
+```
+tuya_local_avent probe          # find the monitor, detect protocol, prove the local key (read-only)
+tuya_local_avent token-check    # check the app signing values are accepted (no password/MFA)
+tuya_local_avent fetch-password # one-time signed login → writes data/bridge.json
+tuya_local_avent run            # the full bridge (the container default)
+```
+
+## Security
+
+- `docker-compose.yml` and `data/` (`bridge.json`, `cloud.json`,
+  `go2rtc.yaml`, all 0600) hold secrets and are gitignored.
+- No unauthenticated stream: see *How it works*. Use a long random
+  `ONVIF_PASS`/`RTSP_PASS`.
+- RTSP and ONVIF are plain-text protocols. Keep the container on a trusted
+  VLAN. This is video of a child: never expose it to the internet.
+
+## Credits / licence
+
+MIT. The video bridge in `bridge/` is vendored from
+[`thekoma/aventproxy`](https://github.com/thekoma/aventproxy) (MIT), whose LAN
+streaming work is by Leonard Pitzu, itself building on seydx's
+`tuya-ipc-terminal`. The Tuya login/signing is ported from aventproxy; the
+Tuya Smart web login references [`AlexxIT/go2rtc`](https://github.com/AlexxIT/go2rtc).
+Their LICENSE files are kept under `bridge/`.
