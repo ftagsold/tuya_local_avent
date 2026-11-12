@@ -281,30 +281,21 @@ async fn handle_command(cfg: &Config, control: &Control, block: &Arc<AtomicU32>,
             tracing::warn!("MQTT {slug}: ignoring unknown option {value:?}");
             return Ok(());
         }
-        Kind::Track => {
+        // Paced multi-DP writes run in a task, so the MQTT loop keeps polling.
+        Kind::Track | Kind::Timer => {
             let Some(index) = d.options.iter().position(|o| *o == value) else {
-                tracing::warn!("MQTT {slug}: ignoring unknown track {value:?}");
+                tracing::warn!("MQTT {slug}: ignoring unknown option {value:?}");
                 return Ok(());
             };
-            // Paced writes: in a task, so the MQTT loop keeps polling.
-            let (control, known) = (control.clone(), block.load(Ordering::Relaxed));
-            tokio::spawn(async move {
-                if let Err(e) = play_track(&control, known, index).await {
-                    tracing::warn!("play track {index}: {e:#}");
-                }
-            });
-            return Ok(());
-        }
-        Kind::Timer => {
-            if !d.options.contains(&value) {
-                tracing::warn!("MQTT {slug}: ignoring unknown timer {value:?}");
-                return Ok(());
-            }
-            let control = control.clone();
+            let (control, known, kind, slug) = (control.clone(), block.load(Ordering::Relaxed), d.kind, d.slug);
             let secs = dp::timer_secs(value);
             tokio::spawn(async move {
-                if let Err(e) = set_timer(&control, secs).await {
-                    tracing::warn!("lullaby timer: {e:#}");
+                let r = match kind {
+                    Kind::Track => play_track(&control, known, index).await,
+                    _ => set_timer(&control, secs).await,
+                };
+                if let Err(e) = r {
+                    tracing::warn!("lullaby {slug}: {e:#}");
                 }
             });
             return Ok(());
@@ -322,36 +313,35 @@ async fn handle_command(cfg: &Config, control: &Control, block: &Arc<AtomicU32>,
     control.write(dps).await
 }
 
+/// Pause between the writes of one multi-DP command.
+const WRITE_GAP: Duration = Duration::from_millis(300);
+
+/// Write one DP on its own (the monitor ignores some DPs batched together).
+async fn write_one(control: &Control, id: u32, value: Value) -> Result<()> {
+    control.write(BTreeMap::from([(id.to_string(), value)])).await
+}
+
 /// Play catalogue track `index`: DP 202, then `play` on 201, each in its own
 /// write (the monitor ignores 201 and 202 batched together). Until the
 /// monitor has reported a track id its block is unknown, so the id is sent
 /// for every block: it ignores the ones outside its own.
 async fn play_track(control: &Control, known: u32, index: usize) -> Result<()> {
     let blocks: Vec<u32> = if known != 0 { vec![known] } else { dp::TRACK_BLOCKS.to_vec() };
-    let gap = Duration::from_millis(300);
     for b in blocks {
-        let mut dps = BTreeMap::new();
-        dps.insert(dp::PLAY_TRACK.to_string(), json!(dp::track_value(b, index)));
-        control.write(dps).await?;
-        tokio::time::sleep(gap).await;
+        write_one(control, dp::PLAY_TRACK, json!(dp::track_value(b, index))).await?;
+        tokio::time::sleep(WRITE_GAP).await;
     }
-    let mut dps = BTreeMap::new();
-    dps.insert(dp::PLAY_CONTROL.to_string(), json!("play"));
-    control.write(dps).await
+    write_one(control, dp::PLAY_CONTROL, json!("play")).await
 }
 
 /// Set the lullaby timer: length (244), then switch on (243), or just the
-/// switch off for "Forever". One DP per write, as for the track.
+/// switch off for "Forever".
 async fn set_timer(control: &Control, secs: Option<i64>) -> Result<()> {
     if let Some(secs) = secs {
-        let mut dps = BTreeMap::new();
-        dps.insert(dp::TIMER_SECS.to_string(), json!(secs));
-        control.write(dps).await?;
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        write_one(control, dp::TIMER_SECS, json!(secs)).await?;
+        tokio::time::sleep(WRITE_GAP).await;
     }
-    let mut dps = BTreeMap::new();
-    dps.insert(dp::TIMER_SWITCH.to_string(), json!(secs.is_some()));
-    control.write(dps).await
+    write_one(control, dp::TIMER_SWITCH, json!(secs.is_some())).await
 }
 
 #[cfg(test)]

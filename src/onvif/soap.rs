@@ -409,6 +409,22 @@ xmlns:dn=\"http://www.onvif.org/ver10/network/wsdl\">\
     )
 }
 
+
+/// Days since the Unix epoch to a (year, month, day) civil date (Howard
+/// Hinnant's algorithm). Used only to fill GetSystemDateAndTime.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -542,19 +558,4 @@ mod tests {
         assert_eq!(elem_text("<UsernameToken><Username>bob</Username>", "Username").as_deref(), Some("bob"));
         assert_eq!(elem_text("<wsu:Created xmlns:wsu=\"x\">T</wsu:Created>", "Created").as_deref(), Some("T"));
     }
-}
-
-/// Days since the Unix epoch to a (year, month, day) civil date (Howard
-/// Hinnant's algorithm). Used only to fill GetSystemDateAndTime.
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
 }

@@ -11,6 +11,13 @@ services:
     container_name: tuya_local_avent
     restart: unless-stopped
     init: true                     # reap ffmpeg/go2rtc children
+    # Everything logs to stdout (the bridge, ffmpeg and go2rtc through it):
+    # cap the container log at 3 x 10 MB.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     # Own MAC/IP so UniFi Protect discovers the ONVIF camera. Create the
     # network first (adjust parent + subnet to your LAN):
     #   docker network create -d macvlan \

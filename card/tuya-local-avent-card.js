@@ -48,7 +48,7 @@
  */
 
 const CARD = "tuya-local-avent-card";
-const VERSION = "1.8.0";
+const VERSION = "1.8.1";
 
 const ALL_CONTROLS = ["listen", "night_light", "lullaby", "talk", "fullscreen", "background"];
 // Controls that open a panel (toggle + slider); the rest act on tap.
@@ -93,7 +93,6 @@ const STALL_MS = 15000;
 const POSITIONS = {
   "top-left": "top:8px;left:8px;",
   "top-center": "top:8px;left:50%;transform:translateX(-50%);",
-  "top-right": "top:8px;right:8px;text-align:right;",
   "center-left": "top:50%;left:8px;transform:translateY(-50%);",
   center: "top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;",
   "center-right": "top:50%;right:8px;transform:translateY(-50%);text-align:right;",
@@ -303,8 +302,21 @@ class TuyaLocalAventCard extends HTMLElement {
     clearTimeout(this._hideTimer);
     this._stopTalk();
     this._stopVideo();
-    // A detached <img> keeps downloading the MJPEG stream.
-    if (this._mjpeg) this._els?.video.removeAttribute("src");
+    this._releaseMedia();
+  }
+
+  // Detach the stream from the media elements. A detached <video>/<audio>
+  // that still holds a stream keeps playing (and keeps its whole old DOM
+  // alive); a detached <img> keeps downloading the MJPEG stream.
+  _releaseMedia() {
+    for (const el of [this._els?.video, this._els?.audio]) {
+      if (!el) continue;
+      if (el instanceof HTMLImageElement) el.removeAttribute("src");
+      else {
+        el.pause();
+        el.srcObject = null;
+      }
+    }
   }
 
   getCardSize() {
@@ -461,6 +473,7 @@ class TuyaLocalAventCard extends HTMLElement {
 
   _render() {
     if (!this.shadowRoot) this.attachShadow({ mode: "open" });
+    this._releaseMedia(); // the elements about to be replaced
     const c = this._config;
     const icon = (key) => `<ha-icon icon="${ICONS[key][0]}"></ha-icon>`;
     const panelKeys = c.controls.filter((k) => PANEL_CONTROLS.includes(k));

@@ -171,6 +171,10 @@ docker compose up -d --build
 
 Set `ONVIF_BIND_IP` to the container's `ipv4_address`.
 
+Logs: everything (the bridge, ffmpeg, go2rtc) goes to the container's
+stdout; the compose file caps it at 3 x 10 MB (`logging:` json-file). With
+plain `docker run`, pass `--log-opt max-size=10m --log-opt max-file=3`.
+
 - **Home Assistant control**: set `MQTT_HOST` and the broker's
   `MQTT_USER`/`MQTT_PASS` (the Mosquitto add-on refuses anonymous clients);
   the entities appear via MQTT discovery. Use the broker's IP: `.local` names
@@ -342,6 +346,12 @@ tuya_local_avent run            # the full bridge (the container default)
   `ONVIF_PASS`/`RTSP_PASS`.
 - RTSP and ONVIF are plain-text protocols. Keep the container on a trusted
   VLAN. This is video of a child: never expose it to the internet.
+- The card's VLC hand-off passes Home Assistant's HLS URL, which carries
+  HA's stream token (anyone with the URL can watch until HA ends that
+  stream, 30 s after the last request). It goes only to VLC on the phone,
+  over HA's own connection (HTTPS when HA is).
+- The burnt-in temperature (`data/temperature.txt`) is 0600 like the other
+  data files.
 
 ## Credits / licence
 
