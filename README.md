@@ -256,8 +256,12 @@ Set `ONVIF_BIND_IP` to the container's `ipv4_address`.
   background*; then locking the phone keeps the sound playing, with lock-screen
   controls. HLS lags a few seconds.
 - **Overlays**: other entities' states as transparent HTML text over the
-  video. The editor has a picker (with search) per corner: top right,
-  bottom left, bottom right (`overlay_top_right` etc.). The `overlays`
+  video. The top corners are burnt into the picture by the bridge: clock
+  and name top left, the monitor's temperature top right (updated on each
+  temperature report; the last value survives a restart). The editor has a
+  picker (with search) for bottom left and bottom right
+  (`overlay_bottom_left`, `overlay_bottom_right`); YAML overlays placed top
+  right are dropped. The `overlays`
   YAML list adds more, at a named position or at explicit
   `top/left/right/bottom`.
 
@@ -277,8 +281,7 @@ talk_volume: 100             # default talk gain, 0-200 %
 autohide: 5                  # hide controls after N s; 0 = always shown
 default_track: Brahms' Lullaby   # lullaby play starts this; unset = current track
 default_timer: 30 min        # set before play: 5|10|20|30|60|90 min, Forever
-overlay_top_right: sensor.nursery_temperature   # corner overlays (editor pickers)
-overlay_bottom_left: binary_sensor.nursery_motion
+overlay_bottom_left: binary_sensor.nursery_motion   # corner overlays (editor pickers)
 # overlay_bottom_right: ...
 # night_light: light.nursery_night_light   # optional overrides
 # lullaby: select.nursery_lullaby
@@ -287,7 +290,7 @@ overlay_bottom_left: binary_sensor.nursery_motion
 # volume: number.nursery_volume
 overlays:
   - entity: sensor.nursery_temperature
-    position: top-right      # top-left|top-center|top-right|center-left|center|
+    position: bottom-right   # top-left|top-center|center-left|center|
                              # center-right|bottom-left|bottom-center|bottom-right
   - entity: binary_sensor.nursery_motion
     name: Motion             # label; `name: true` = friendly name

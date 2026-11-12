@@ -39,14 +39,16 @@
  *   named after the stream. VLC keeps playing it as audio with the screen
  *   locked once its Background/PiP mode is "Play videos in background".
  * - Overlays: other entities' states as plain HTML text over the video:
- *   the editor's three corner pickers, plus the `overlays` YAML list.
+ *   the editor's bottom-corner pickers, plus the `overlays` YAML list. The
+ *   top corners belong to the picture: the bridge burns the clock (left)
+ *   and the temperature (right) into the video.
  *
  * No build step, no dependencies: copy to /config/www and add
  * /local/tuya-local-avent-card.js as a dashboard resource (JavaScript module).
  */
 
 const CARD = "tuya-local-avent-card";
-const VERSION = "1.6.0";
+const VERSION = "1.7.0";
 
 const ALL_CONTROLS = ["listen", "night_light", "lullaby", "talk", "fullscreen", "background"];
 // Controls that open a panel (toggle + slider); the rest act on tap.
@@ -80,7 +82,7 @@ const TRACKS = [
 // The bridge's lullaby timer options.
 const TIMERS = ["5 min", "10 min", "20 min", "30 min", "60 min", "90 min", "Forever"];
 // Editor corner pickers: config key -> overlay position.
-const CORNERS = { overlay_top_right: "top-right", overlay_bottom_left: "bottom-left", overlay_bottom_right: "bottom-right" };
+const CORNERS = { overlay_bottom_left: "bottom-left", overlay_bottom_right: "bottom-right" };
 // A slider value sent to an entity wins over its state for this long, or
 // until the state matches.
 const PENDING_MS = 5000;
@@ -237,8 +239,9 @@ class TuyaLocalAventCard extends HTMLElement {
   setConfig(config) {
     if (!config || !config.camera) throw new Error("camera is required (the ONVIF camera entity)");
     if (config.overlays !== undefined && !Array.isArray(config.overlays)) throw new Error("overlays must be a list");
+    // Top right is the burnt-in temperature: overlays placed there are dropped.
     const overlays = [
-      ...(config.overlays ?? []),
+      ...(config.overlays ?? []).filter((o) => o?.position !== "top-right"),
       ...Object.entries(CORNERS)
         .filter(([k]) => config[k])
         .map(([k, position]) => ({ entity: config[k], position })),
@@ -874,7 +877,7 @@ class TuyaLocalAventCard extends HTMLElement {
         if (ov.text) text = `${ov.text}`.replace("{state}", text);
         const name = ov.name === true ? st?.attributes.friendly_name : ov.name;
         const label = name ? `${esc(name)}: ` : "";
-        const pos = POSITIONS[ov.position || "top-right"] ?? "";
+        const pos = POSITIONS[ov.position || "bottom-right"] ?? "";
         const custom = ["top", "left", "right", "bottom"]
           .filter((k) => ov[k] !== undefined)
           .map((k) => `${k}:${typeof ov[k] === "number" ? `${ov[k]}%` : esc(ov[k])};`)
@@ -1182,7 +1185,7 @@ const SCHEMA = [
     name: "overlay_corners",
     flatten: true,
     expanded: true,
-    title: "Overlays (entity state shown in a corner)",
+    title: "Overlays (entity state in a bottom corner; the video shows the temperature top right)",
     schema: Object.keys(CORNERS).map((name) => ({ name, selector: { entity: {} } })),
   },
   {
@@ -1205,7 +1208,6 @@ const EDITOR_LABELS = {
   default_track: "Lullaby to play (empty = the monitor's current one)",
   default_timer: "Lullaby timer (empty = the monitor's current one)",
   lullaby_timer: "Lullaby timer",
-  overlay_top_right: "Top right",
   overlay_bottom_left: "Bottom left",
   overlay_bottom_right: "Bottom right",
   lullaby: "Lullaby",

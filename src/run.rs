@@ -287,6 +287,12 @@ pub async fn run(env: Env) -> Result<()> {
     // 6. ffmpeg relay: overlay + H.264/AAC, bridge → go2rtc (started in 9).
     let overlay_path = media::data_file(&env.data_dir, "overlay.txt");
     media::write_private(&overlay_path, media::overlay_text(&device_name).as_bytes())?;
+    // Temperature, top right: the last reading survives a restart (the
+    // monitor only reports changes); a space until the first one.
+    let temperature_path = media::data_file(&env.data_dir, "temperature.txt");
+    if !temperature_path.exists() {
+        media::write_overlay_file(&temperature_path, " ")?;
+    }
     let drawtext = media::drawtext_supported(&env.ffmpeg, &env.overlay_font);
     if !drawtext {
         tracing::error!(
@@ -298,7 +304,15 @@ pub async fn run(env: Env) -> Result<()> {
     let relay_spec = Spec {
         name: "ffmpeg relay",
         program: env.ffmpeg.clone(),
-        args: media::relay_args(&bridge_url, &publish_url, drawtext.then_some((env.overlay_font.as_str(), overlay_path.as_path()))),
+        args: media::relay_args(
+            &bridge_url,
+            &publish_url,
+            drawtext.then_some(media::Overlay {
+                font: &env.overlay_font,
+                clock: &overlay_path,
+                temperature: &temperature_path,
+            }),
+        ),
         // ffmpeg's own -timeout catches a dead input; this catches the rest
         // (input alive but no decodable frames, or a blocked output).
         watchdog: Some((relay_health.clone(), RELAY_STALL)),
@@ -311,6 +325,24 @@ pub async fn run(env: Env) -> Result<()> {
         local_key: env.local_key.clone(),
         ip: control_ip_rx,
         version,
+    });
+    // Temperature pushes (DP 207) → the overlay file.
+    let mut temps = control.subscribe();
+    let temp_file = temperature_path.clone();
+    tokio::spawn(async move {
+        loop {
+            match temps.recv().await {
+                Ok(u) if u.id == crate::dp::TEMPERATURE => {
+                    if let Some(raw) = u.value.as_f64() {
+                        if let Err(e) = media::write_overlay_file(&temp_file, &media::temperature_text(raw)) {
+                            tracing::warn!("temperature overlay: {e:#}");
+                        }
+                    }
+                }
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
     });
     if !env.mqtt_host.is_empty() {
         let mcfg = crate::ha::mqtt::Config {

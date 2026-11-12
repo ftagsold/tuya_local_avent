@@ -64,6 +64,8 @@ pub static DPS: &[Dp] = &[
 /// are echoed here, not on 202.
 pub const PLAY_CURRENT: u32 = 248;
 pub const PLAY_CONTROL: u32 = 201;
+/// Temperature, °C x 100 (also burnt into the video).
+pub const TEMPERATURE: u32 = 207;
 pub const PLAY_TRACK: u32 = 202;
 
 /// The built-in tracks, in id order (also the order `next` steps through

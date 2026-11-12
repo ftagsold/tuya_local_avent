@@ -140,6 +140,27 @@ pub fn overlay_text(device_name: &str) -> String {
     format!("%{{localtime:%d-%m-%Y %H\\:%M\\:%S}} | {name}")
 }
 
+/// Temperature overlay text (the monitor reports °C x 100): `21.5 °C`.
+pub fn temperature_text(raw: f64) -> String {
+    format!("{:.1} °C", raw / 100.0)
+}
+
+/// Write a text file drawtext re-reads (`reload=1`): a temp file renamed over
+/// it, so a frame never sees a half-written file.
+pub fn write_overlay_file(path: &Path, text: &str) -> Result<()> {
+    let tmp = path.with_extension("tmp");
+    write_private(&tmp, text.as_bytes())?;
+    std::fs::rename(&tmp, path).with_context(|| format!("rename {}", path.display()))
+}
+
+/// What the relay burns into the picture: the clock and device name top
+/// left, the temperature top right (re-read every frame), same style.
+pub struct Overlay<'a> {
+    pub font: &'a str,
+    pub clock: &'a Path,
+    pub temperature: &'a Path,
+}
+
 /// ffmpeg arguments for the relay: pull the bridge, burn the overlay (when
 /// `drawtext` is available), H.264 + AAC (UniFi Protect plays no G.711) +
 /// Opus, publish to go2rtc.
@@ -154,7 +175,7 @@ pub fn overlay_text(device_name: &str) -> String {
 ///   Multi-slice frames and out-of-band-only SPS/PPS break Protect and VLC.
 /// - `-timeout`: a silent input (bridge stalled) ends ffmpeg instead of
 ///   hanging; `-progress pipe:1` feeds the stall watchdog in `supervise`.
-pub fn relay_args(input: &str, output: &str, overlay: Option<(&str, &Path)>) -> Vec<String> {
+pub fn relay_args(input: &str, output: &str, overlay: Option<Overlay>) -> Vec<String> {
     let mut a: Vec<String> = [
         "-hide_banner", "-loglevel", "warning", "-nostdin", "-nostats", "-progress", "pipe:1",
         "-rtsp_transport", "tcp", "-timeout", "10000000", "-i", input,
@@ -164,11 +185,10 @@ pub fn relay_args(input: &str, output: &str, overlay: Option<(&str, &Path)>) -> 
     .map(|s| s.to_string())
     .collect();
     let mut vf = String::from("fps=25");
-    if let Some((font, textfile)) = overlay {
-        vf.push_str(&format!(
-            ",drawtext=fontfile={font}:textfile={}:expansion=normal:x=10:y=10:fontsize=24:fontcolor=white",
-            textfile.display()
-        ));
+    if let Some(o) = overlay {
+        let style = format!("fontfile={}:y=10:fontsize=24:fontcolor=white", o.font);
+        vf.push_str(&format!(",drawtext={style}:textfile={}:expansion=normal:x=10", o.clock.display()));
+        vf.push_str(&format!(",drawtext={style}:textfile={}:reload=1:expansion=none:x=w-tw-10", o.temperature.display()));
     }
     a.push("-vf".into());
     a.push(vf);
@@ -383,6 +403,16 @@ mod tests {
     fn userinfo_percent_encodes() {
         assert_eq!(userinfo("a b", "p@ss:/"), "a%20b:p%40ss%3A%2F@");
         assert_eq!(userinfo("", "x"), "");
+    }
+
+    #[test]
+    fn temperature_is_drawn_top_right_and_reloaded() {
+        let (clock, temp) = (Path::new("/d/overlay.txt"), Path::new("/d/temperature.txt"));
+        let a = relay_args("in", "out", Some(Overlay { font: "/f.ttf", clock, temperature: temp }));
+        let vf = &a[a.iter().position(|x| x == "-vf").unwrap() + 1];
+        assert!(vf.contains("textfile=/d/overlay.txt:expansion=normal:x=10"));
+        assert!(vf.contains("textfile=/d/temperature.txt:reload=1:expansion=none:x=w-tw-10"));
+        assert_eq!(temperature_text(2150.0), "21.5 °C");
     }
 
     #[test]
