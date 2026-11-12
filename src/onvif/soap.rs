@@ -206,13 +206,13 @@ fn system_date() -> String {
 fn device_info(cfg: &Config) -> String {
     format!(
         "<tds:GetDeviceInformationResponse>\
-<tds:Manufacturer>Philips Avent</tds:Manufacturer>\
+<tds:Manufacturer>{}</tds:Manufacturer>\
 <tds:Model>{}</tds:Model>\
 <tds:FirmwareVersion>1.0</tds:FirmwareVersion>\
 <tds:SerialNumber>{}</tds:SerialNumber>\
 <tds:HardwareId>avent-{}</tds:HardwareId>\
 </tds:GetDeviceInformationResponse>",
-        xml(&cfg.model), xml(&cfg.device_id), xml(&cfg.device_id)
+        xml(&cfg.manufacturer), xml(&cfg.model), xml(&cfg.device_id), xml(&cfg.device_id)
     )
 }
 
@@ -436,7 +436,7 @@ mod tests {
             stream_uri_plain: "rtsp://192.168.1.90:8554/Nursery".into(),
             snapshot_src: String::new(),
             user: "avent".into(), pass: "secret".into(),
-            device_name: "Nursery <3".into(), model: "Nursery <3".into(), mac: super::super::device_mac("dev1"), device_id: "dev1".into(),
+            device_name: "Nursery <3".into(), model: "Nursery <3".into(), manufacturer: String::new(), mac: super::super::device_mac("dev1"), device_id: "dev1".into(),
         }
     }
 
@@ -563,5 +563,6 @@ mod tests {
     fn device_info_reports_model_escaped() {
         let r = dispatch("GetDeviceInformation", "", &cfg(), false).unwrap();
         assert!(r.contains("<tds:Model>Nursery &lt;3</tds:Model>"));
+        assert!(r.contains("<tds:Manufacturer></tds:Manufacturer>"));
     }
 }

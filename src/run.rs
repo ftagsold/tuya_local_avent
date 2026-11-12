@@ -57,6 +57,7 @@ pub struct Env {
     pub onvif_port: u16,
     pub onvif_host_ip: String,
     pub onvif_model: String,
+    pub onvif_manufacturer: String,
     pub onvif_mac: String,
     pub rtsp_user: String,
     pub rtsp_pass: String,
@@ -102,6 +103,7 @@ impl Env {
             onvif_port: port("ONVIF_PORT", 8000),
             onvif_host_ip: get("ONVIF_BIND_IP"),
             onvif_model: get("ONVIF_MODEL"),
+            onvif_manufacturer: get("ONVIF_MANUFACTURER"),
             onvif_mac: get("ONVIF_MAC"),
             overlay_font: or("AVENT_OVERLAY_FONT", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
             ffmpeg: or("AVENT_FFMPEG", "ffmpeg"),
@@ -413,9 +415,10 @@ pub async fn run(env: Env) -> Result<()> {
         onvif_port: env.onvif_port,
         user: env.onvif_user.clone(),
         pass: env.onvif_pass.clone(),
-        // Protect names an adopted camera after the model: default to the
-        // stream name.
-        model: if env.onvif_model.is_empty() { path.clone() } else { env.onvif_model.clone() },
+        // Protect names an adopted camera "<manufacturer> <model>": default
+        // to the camera name alone (empty manufacturer).
+        model: if env.onvif_model.is_empty() { device_name.clone() } else { env.onvif_model.clone() },
+        manufacturer: env.onvif_manufacturer.clone(),
         mac: env.onvif_mac.clone(),
         device_name: device_name.clone(),
         device_id: env.device_id.clone(),

@@ -34,6 +34,8 @@ pub struct Config {
     pub device_name: String,
     /// GetDeviceInformation model; Protect names the adopted camera after it.
     pub model: String,
+    /// GetDeviceInformation manufacturer; Protect prefixes the name with it.
+    pub manufacturer: String,
     /// MAC reported by GetNetworkInterfaces; pinned on the interface too.
     pub mac: String,
     pub device_id: String,
@@ -394,7 +396,7 @@ mod tests {
             host_ip: "192.168.1.90".into(), onvif_port: 8000,
             stream_uri: String::new(), stream_uri_plain: String::new(), snapshot_src: String::new(),
             user: "avent".into(), pass: "secret".into(),
-            device_name: "Nursery".into(), model: "Nursery".into(), mac: device_mac("dev1"), device_id: "dev1".into(),
+            device_name: "Nursery".into(), model: "Nursery".into(), manufacturer: String::new(), mac: device_mac("dev1"), device_id: "dev1".into(),
         }
     }
 
