@@ -5,6 +5,8 @@
 //! and state stays on the LAN; MQTT only carries it to Home Assistant.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -44,11 +46,14 @@ pub async fn run(cfg: Config, control: Control) -> Result<()> {
     opts.set_last_will(LastWill::new(&avail, "offline", QoS::AtLeastOnce, true));
 
     let (client, mut eventloop) = AsyncClient::new(opts, 64);
+    // Track-id block this monitor's catalogue uses (0 = not reported yet).
+    let block = Arc::new(AtomicU32::new(0));
 
     // Fan monitor updates onto MQTT state topics.
     let mut updates = control.subscribe();
     let state_client = client.clone();
     let dev = cfg.device_id.clone();
+    let seen_block = block.clone();
     tokio::spawn(async move {
         loop {
             // Lagged (a burst outran us) only skips; only Closed ends this.
@@ -57,6 +62,16 @@ pub async fn run(cfg: Config, control: Control) -> Result<()> {
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             };
+            // The playing track comes back on 248 (and maybe 202): its id
+            // names the track and tells which block this monitor uses.
+            if u.id == dp::PLAY_CURRENT || u.id == dp::PLAY_TRACK {
+                if let Some((b, name)) = dp::current_track_id(&u.value).and_then(dp::track_by_id) {
+                    seen_block.store(b, Ordering::Relaxed);
+                    let topic = format!("{}/lullaby_track/state", base(&dev));
+                    let _ = state_client.publish(topic, QoS::AtLeastOnce, true, name).await;
+                }
+                continue;
+            }
             if let Some(d) = dp::by_id(u.id) {
                 let topic = format!("{}/{}/state", base(&dev), d.slug);
                 let payload = state_payload(d, &u.value);
@@ -90,7 +105,7 @@ pub async fn run(cfg: Config, control: Control) -> Result<()> {
             Ok(Event::Incoming(Incoming::Publish(p))) => {
                 let topic = String::from_utf8_lossy(p.topic.as_bytes()).to_string();
                 let value = String::from_utf8_lossy(&p.payload).to_string();
-                if let Err(e) = handle_command(&cfg, &control, &topic, &value).await {
+                if let Err(e) = handle_command(&cfg, &control, &block, &topic, &value).await {
                     tracing::warn!("command {topic}={value} failed: {e:#}");
                 }
             }
@@ -140,9 +155,16 @@ async fn publish_discovery(client: &AsyncClient, cfg: &Config) -> Result<()> {
             Kind::Light => ("light", light_config(cfg)),
             Kind::Brightness => continue, // part of the light
             Kind::Number => ("number", json!({ "min": d.min, "max": d.max, "command_topic": cmd_topic(cfg, d.slug), "unit_of_measurement": d.unit })),
-            Kind::Select => ("select", json!({ "options": d.options, "command_topic": cmd_topic(cfg, d.slug) })),
+            Kind::Select | Kind::Track => ("select", json!({ "options": d.options, "command_topic": cmd_topic(cfg, d.slug) })),
             Kind::Sensor => ("sensor", json!({ "unit_of_measurement": d.unit, "device_class": d.device_class })),
-            Kind::BinarySensor => ("binary_sensor", json!({ "device_class": d.device_class, "payload_on": "true", "payload_off": "false", "off_delay": 30 })),
+            Kind::BinarySensor => {
+                let mut c = json!({ "device_class": d.device_class, "payload_on": "true", "payload_off": "false" });
+                // Alert events have no "off": clear them after 30 s.
+                if d.on_value.is_empty() {
+                    c["off_delay"] = json!(30);
+                }
+                ("binary_sensor", c)
+            }
         };
         let obj = config.as_object_mut().unwrap();
         obj.insert("name".into(), json!(d.name));
@@ -188,6 +210,7 @@ async fn subscribe_commands(client: &AsyncClient, cfg: &Config) -> Result<()> {
 /// Convert a raw DP value to the string HA expects on the state topic.
 fn state_payload(d: &dp::Dp, raw: &Value) -> String {
     match d.kind {
+        Kind::BinarySensor if !d.on_value.is_empty() => (raw.as_str() == Some(d.on_value)).to_string(),
         Kind::Switch | Kind::Light | Kind::BinarySensor => {
             // Tuya booleans; alert DPs may be non-empty strings meaning "on".
             match raw {
@@ -201,12 +224,12 @@ fn state_payload(d: &dp::Dp, raw: &Value) -> String {
             Some(n) => format!("{n}"),
             None => raw.as_str().unwrap_or("").to_string(),
         },
-        Kind::Select => raw.as_str().unwrap_or("").to_string(),
+        Kind::Select | Kind::Track => raw.as_str().unwrap_or("").to_string(),
     }
 }
 
 /// Turn an HA command into a DP write, with the raw value the monitor expects.
-async fn handle_command(cfg: &Config, control: &Control, topic: &str, value: &str) -> Result<()> {
+async fn handle_command(cfg: &Config, control: &Control, block: &Arc<AtomicU32>, topic: &str, value: &str) -> Result<()> {
     let slug = topic.strip_prefix(&format!("{}/", base(&cfg.device_id))).and_then(|s| s.strip_suffix("/set"));
     let Some(slug) = slug else { return Ok(()) };
     let Some(d) = dp::DPS.iter().find(|d| d.slug == slug) else { return Ok(()) };
@@ -228,6 +251,20 @@ async fn handle_command(cfg: &Config, control: &Control, topic: &str, value: &st
             tracing::warn!("MQTT {slug}: ignoring unknown option {value:?}");
             return Ok(());
         }
+        Kind::Track => {
+            let Some(index) = d.options.iter().position(|o| *o == value) else {
+                tracing::warn!("MQTT {slug}: ignoring unknown track {value:?}");
+                return Ok(());
+            };
+            // Paced writes: in a task, so the MQTT loop keeps polling.
+            let (control, known) = (control.clone(), block.load(Ordering::Relaxed));
+            tokio::spawn(async move {
+                if let Err(e) = play_track(&control, known, index).await {
+                    tracing::warn!("play track {index}: {e:#}");
+                }
+            });
+            return Ok(());
+        }
         _ => return Ok(()),
     };
     let mut dps = BTreeMap::new();
@@ -238,6 +275,24 @@ async fn handle_command(cfg: &Config, control: &Control, topic: &str, value: &st
             dps.insert(p.to_string(), json!(false));
         }
     }
+    control.write(dps).await
+}
+
+/// Play catalogue track `index`: DP 202, then `play` on 201, each in its own
+/// write (the monitor ignores 201 and 202 batched together). Until the
+/// monitor has reported a track id its block is unknown, so the id is sent
+/// for every block: it ignores the ones outside its own.
+async fn play_track(control: &Control, known: u32, index: usize) -> Result<()> {
+    let blocks: Vec<u32> = if known != 0 { vec![known] } else { dp::TRACK_BLOCKS.to_vec() };
+    let gap = Duration::from_millis(300);
+    for b in blocks {
+        let mut dps = BTreeMap::new();
+        dps.insert(dp::PLAY_TRACK.to_string(), json!(dp::track_value(b, index)));
+        control.write(dps).await?;
+        tokio::time::sleep(gap).await;
+    }
+    let mut dps = BTreeMap::new();
+    dps.insert(dp::PLAY_CONTROL.to_string(), json!("play"));
     control.write(dps).await
 }
 
@@ -253,5 +308,12 @@ mod tests {
         assert_eq!(c["brightness_command_topic"], "avent/dev1/brightness/set");
         assert_eq!(c["brightness_state_topic"], "avent/dev1/brightness/state");
         assert_eq!(c["brightness_scale"], 100.0);
+    }
+
+    #[test]
+    fn lullaby_playing_reads_the_play_state() {
+        let d = dp::by_id(246).unwrap();
+        assert_eq!(state_payload(d, &json!("playing")), "true");
+        assert_eq!(state_payload(d, &json!("stopping")), "false");
     }
 }

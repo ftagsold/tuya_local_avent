@@ -14,8 +14,13 @@
  *   `autohide` seconds without interaction, except while a control is open
  *   or talk is on. A tap on a button turns the group into that control
  *   (on/off toggle + slider); a tap on the video returns to the buttons. The
- *   night light, lullaby and volume are the bridge's MQTT entities, found on
- *   the camera's device unless set explicitly.
+ *   night light, lullaby, lullaby track, lullaby playing and volume are the
+ *   bridge's MQTT entities, found on the camera's device unless set
+ *   explicitly. The lullaby panel also picks the track; play starts the
+ *   configured `default_track`, or resumes the monitor's current one.
+ * - Sliders: drawn by the card (pointer events), not <input type=range>:
+ *   they follow the turned landscape stage and hold a sent value until the
+ *   entity reports it, so a state update does not jump the thumb back.
  * - Full screen: the video with its overlays and controls (Fullscreen API,
  *   or a fixed full-window layer where the browser has none, e.g. iPhone).
  *   On a phone held upright it shows landscape: orientation lock where the
@@ -24,6 +29,9 @@
  *   loads. Browsers allow unmuted autoplay only after a user gesture: if
  *   refused, the card starts muted, shows "Tap for sound" and turns listen
  *   on at the first tap anywhere on the page.
+ * - Background: listen audio plays from its own <audio> element, so it keeps
+ *   playing while the page is hidden or the phone is locked, where the
+ *   browser or app allows it (lock-screen media controls via Media Session).
  * - Overlays: other entities' states as plain HTML text over the video.
  *
  * No build step, no dependencies: copy to /config/www and add
@@ -31,7 +39,7 @@
  */
 
 const CARD = "tuya-local-avent-card";
-const VERSION = "1.2.1";
+const VERSION = "1.3.0";
 
 const ALL_CONTROLS = ["listen", "night_light", "lullaby", "talk", "fullscreen"];
 // Controls that open a panel (toggle + slider); the rest act on tap.
@@ -41,7 +49,7 @@ const LEGACY_CONTROLS = ["lullaby_volume", "talk_volume"];
 const CONTROL_LABELS = {
   listen: "Listen (mute + volume)",
   night_light: "Night light (on/off + 33 / 66 / 100 %)",
-  lullaby: "Lullaby (play/stop + volume)",
+  lullaby: "Lullaby (play/stop + track + volume)",
   talk: "Talk (on/off + talk volume)",
   fullscreen: "Full screen",
 };
@@ -53,6 +61,16 @@ const ICONS = {
   talk: ["mdi:microphone", "mdi:microphone-off"],
   fullscreen: ["mdi:fullscreen-exit", "mdi:fullscreen"],
 };
+// The monitor's built-in tracks (the bridge's lullaby track options); the
+// editor's fallback when that entity is not found.
+const TRACKS = [
+  "Baa Baa Black Sheep", "Brahms' Lullaby", "Rock-a-Bye Baby", "Golden Slumbers", "Hush Little Baby",
+  "Mother's Shh", "Calming River", "Heartbeat", "Vacuum Cleaner", "White Noise",
+  "Garden Bird Song", "Valley Wind", "Ocean Shore", "Night-time Nature", "Rain Shower",
+];
+// A slider value sent to an entity wins over its state for this long, or
+// until the state matches.
+const PENDING_MS = 5000;
 // Config defaults; the editor leaves keys at these values out of the YAML.
 const DEFAULTS = { talk_mode: "toggle", listen: false, listen_volume: 100, talk_volume: 100, autohide: 5 };
 // No decoded video frame for this long = dead stream: reconnect.
@@ -72,6 +90,8 @@ const POSITIONS = {
 const AUTO = {
   night_light: { domain: "light", suffix: "night_light" },
   lullaby: { domain: "select", suffix: "lullaby" },
+  lullaby_track: { domain: "select", suffix: "lullaby_track" },
+  lullaby_playing: { domain: "binary_sensor", suffix: "lullaby_playing" },
   volume: { domain: "number", suffix: "volume" },
 };
 
@@ -122,7 +142,17 @@ const STYLE = `
   .btn[disabled] { opacity: .4; cursor: default; }
   @keyframes pulse { 70% { box-shadow: 0 0 0 10px rgba(219, 68, 55, 0); } 100% { box-shadow: 0 0 0 0 rgba(219, 68, 55, 0); } }
   .panel { display: flex; align-items: center; gap: 12px; flex: 1 1 auto; min-width: 0; padding-right: 10px; }
-  .panel input[type=range] { flex: 1 1 auto; min-width: 0; accent-color: var(--primary-color, #03a9f4); height: 28px; }
+  .slider { flex: 1 1 auto; min-width: 0; height: 40px; display: flex; align-items: center; cursor: pointer;
+    touch-action: none; -webkit-tap-highlight-color: transparent; outline: none; }
+  .slider .rail { position: relative; width: 100%; height: 6px; border-radius: 3px; background: rgba(255, 255, 255, .25); }
+  .slider .fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: var(--primary-color, #03a9f4); }
+  .slider .thumb { position: absolute; top: 50%; width: 20px; height: 20px; margin: -10px 0 0 -10px; border-radius: 50%;
+    background: #fff; box-shadow: 0 1px 4px rgba(0, 0, 0, .45); }
+  .slider:focus-visible .thumb { box-shadow: 0 0 0 3px var(--primary-color, #03a9f4); }
+  .slider.disabled { opacity: .4; pointer-events: none; }
+  .panel select { flex: 0 1 auto; min-width: 0; max-width: 42%; height: 32px; padding: 0 8px; border: 0; border-radius: 999px;
+    background: rgba(255, 255, 255, .12); color: #fff; font: inherit; font-size: 13px; text-overflow: ellipsis; }
+  .panel select option { color: #000; }
   .panel .val { flex: 0 0 auto; min-width: 3.2em; text-align: right; font-size: 13px;
     font-variant-numeric: tabular-nums; opacity: .9; }
   .panel .note { font-size: 12px; opacity: .85; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -155,8 +185,13 @@ class TuyaLocalAventCard extends HTMLElement {
       this._update();
     };
     this._onVisible = () => {
-      if (document.hidden || !this._mjpeg) return;
-      this._reloadMjpeg();
+      if (document.hidden) return;
+      if (this._mjpeg) return this._reloadMjpeg();
+      // A browser may pause media while hidden; resume it.
+      if (this._stream) {
+        this._els?.video.play?.()?.catch(() => {});
+        if (this._listen) this._els?.audio.play().catch(() => {});
+      }
     };
   }
 
@@ -191,6 +226,7 @@ class TuyaLocalAventCard extends HTMLElement {
     this._listen = !!this._config.listen;
     this._built = false;
     this._open = null;
+    this._pending = {};
     if (restart) {
       this._stopVideo();
       this._mjpeg = false;
@@ -280,9 +316,9 @@ class TuyaLocalAventCard extends HTMLElement {
     const unavailable = (st) => !st || st.state === "unavailable" || st.state === "unknown";
     switch (key) {
       case "listen": {
-        const v = this._els?.video;
+        const a = this._els?.audio;
         return {
-          on: !!v && !v.muted,
+          on: !!a && !a.muted,
           disabled: !!this._mjpeg,
           slider: { min: 0, max: 100, step: 1, value: Math.round(this._listenVol * 100), text: `${Math.round(this._listenVol * 100)}%` },
         };
@@ -297,15 +333,21 @@ class TuyaLocalAventCard extends HTMLElement {
         };
       }
       case "lullaby": {
+        // The monitor reports no state until something changes, so
+        // "unknown" entities stay usable; only "unavailable" disables.
+        const gone = (st) => !st || st.state === "unavailable";
         const st = this._state(this._entity("lullaby"));
+        const playing = this._state(this._entity("lullaby_playing"));
         const vol = this._state(this._entity("volume"));
         const n = Number(vol?.state);
+        const min = Number(vol?.attributes.min ?? 1);
+        const max = Number(vol?.attributes.max ?? 100);
         return {
-          on: st?.state === "play",
-          disabled: unavailable(st),
-          slider: Number.isFinite(n)
-            ? { min: Number(vol.attributes.min ?? 1), max: Number(vol.attributes.max ?? 100), step: Number(vol.attributes.step ?? 1), value: n, text: `${Math.round(n)}%` }
-            : { disabled: true, min: 0, max: 100, step: 1, value: 0, text: "—" },
+          on: playing && !unavailable(playing) ? playing.state === "on" : st?.state === "play",
+          disabled: gone(st),
+          slider: gone(vol)
+            ? { disabled: true, min: 0, max: 100, step: 1, value: 0, text: "—" }
+            : { min, max, step: Number(vol.attributes.step ?? 1), value: Number.isFinite(n) ? n : min, text: Number.isFinite(n) ? `${Math.round(n)}%` : "—" },
         };
       }
       case "talk": {
@@ -334,9 +376,13 @@ class TuyaLocalAventCard extends HTMLElement {
         else this._call("light", "turn_on", { entity_id, brightness_pct: this._lightLevel() });
         break;
       }
-      case "lullaby":
-        this._call("select", "select_option", { entity_id: this._entity("lullaby"), option: m.on ? "stop" : "play" });
+      case "lullaby": {
+        const track = this._entity("lullaby_track");
+        const def = this._config.default_track;
+        if (!m.on && def && track) this._call("select", "select_option", { entity_id: track, option: def });
+        else this._call("select", "select_option", { entity_id: this._entity("lullaby"), option: m.on ? "stop" : "play" });
         break;
+      }
       case "talk":
         if (this._config.talk_mode !== "hold") this._talking ? this._stopTalk() : this._startTalk();
         break;
@@ -344,12 +390,13 @@ class TuyaLocalAventCard extends HTMLElement {
     this._update();
   }
 
-  // Live while dragging (`input`) only for local values; entity writes on `change`.
+  // Live while dragging only for local values; entity writes on release.
   _slide(key, value, final) {
+    if (final && (key === "night_light" || key === "lullaby")) this._pending[key] = { value, until: Date.now() + PENDING_MS };
     switch (key) {
       case "listen":
         this._listenVol = value / 100;
-        this._els.video.volume = this._listenVol;
+        this._els.audio.volume = this._listenVol;
         break;
       case "night_light":
         if (final) this._call("light", "turn_on", { entity_id: this._entity("night_light"), brightness_pct: LIGHT_LEVELS[value - 1] });
@@ -382,7 +429,10 @@ class TuyaLocalAventCard extends HTMLElement {
       .map(
         (k) => `<div class="panel" data-panel="${k}" hidden>
           <button class="btn" data-toggle="${k}">${icon(k)}</button>
-          <input type="range" data-slider="${k}" aria-label="${esc(CONTROL_LABELS[k])}">
+          ${k === "lullaby" ? `<select data-track aria-label="Lullaby track" hidden></select>` : ""}
+          <div class="slider" data-slider="${k}" role="slider" tabindex="0" aria-label="${esc(CONTROL_LABELS[k])}">
+            <div class="rail"><div class="fill"></div><div class="thumb"></div></div>
+          </div>
           <span class="val"></span>
         </div>`,
       )
@@ -391,6 +441,7 @@ class TuyaLocalAventCard extends HTMLElement {
       ${c.title ? `<h1 class="card-header">${esc(c.title)}</h1>` : ""}
       <div class="video" id="video"><div class="stage">
         <video id="v" autoplay playsinline muted></video>
+        <audio id="a" autoplay playsinline muted></audio>
         <div class="status" id="status">Connecting…</div>
         <div class="hint" id="hint" hidden><ha-icon icon="mdi:volume-off"></ha-icon>Tap for sound</div>
         <div id="overlays"></div>
@@ -400,13 +451,17 @@ class TuyaLocalAventCard extends HTMLElement {
         </div>
       </div></div></ha-card>`;
     const $ = (id) => this.shadowRoot.getElementById(id);
-    this._els = { wrap: $("video"), video: $("v"), status: $("status"), hint: $("hint"), overlays: $("overlays"), group: $("group"), main: $("main") };
+    this._els = {
+      wrap: $("video"), video: $("v"), audio: $("a"), status: $("status"), hint: $("hint"),
+      overlays: $("overlays"), group: $("group"), main: $("main"),
+    };
     this._overlayHtml = null;
     this._pseudoFs = false;
     if (this._mjpeg) this._showMjpeg();
-    this._els.video.volume = this._listenVol;
+    this._els.audio.volume = this._listenVol;
     if (this._stream) {
       this._els.video.srcObject = this._stream;
+      this._els.audio.srcObject = this._audioStream;
       this._applyListen();
     }
 
@@ -440,17 +495,70 @@ class TuyaLocalAventCard extends HTMLElement {
         talk.addEventListener("contextmenu", (e) => e.preventDefault());
       }
     }
-    for (const s of group.querySelectorAll("[data-slider]")) {
-      const key = s.dataset.slider;
-      s.addEventListener("input", () => {
-        this._slide(key, Number(s.value), false);
-        this._sliderText(key, Number(s.value));
-      });
-      s.addEventListener("change", () => this._slide(key, Number(s.value), true));
-    }
+    for (const s of group.querySelectorAll("[data-slider]")) this._bindSlider(s);
+    const track = group.querySelector("[data-track]");
+    track?.addEventListener("change", () => {
+      const entity_id = this._entity("lullaby_track");
+      if (entity_id && track.value) this._call("select", "select_option", { entity_id, option: track.value });
+    });
     this._built = true;
     this._setShown(!(c.autohide > 0));
     this._setOpen(null);
+  }
+
+  // ---- sliders ----
+
+  // Pointer drag along the rail. In the turned landscape stage the rail runs
+  // top to bottom on screen, so the position comes from clientY.
+  _bindSlider(s) {
+    const key = s.dataset.slider;
+    const at = (e) => {
+      const r = s.querySelector(".rail").getBoundingClientRect();
+      const turned = this._els.wrap.classList.contains("rotated");
+      const f = turned ? (e.clientY - r.top) / r.height : (e.clientX - r.left) / r.width;
+      const { min, max, step } = s._range;
+      const v = min + Math.round((Math.min(1, Math.max(0, f)) * (max - min)) / step) * step;
+      return Math.min(max, Math.max(min, v));
+    };
+    const move = (v, final) => {
+      if (v === s._value && !final) return;
+      this._setSlider(s, v);
+      this._sliderText(key, v);
+      this._slide(key, v, final);
+    };
+    s.addEventListener("pointerdown", (e) => {
+      if (s.classList.contains("disabled") || e.button > 0) return;
+      e.preventDefault();
+      s.setPointerCapture?.(e.pointerId);
+      s._drag = { from: s._value };
+      s.focus({ preventScroll: true });
+      move(at(e), false);
+    });
+    s.addEventListener("pointermove", (e) => s._drag && move(at(e), false));
+    const end = (e) => {
+      if (!s._drag) return;
+      const changed = s._value !== s._drag.from;
+      s._drag = null;
+      if (e.type === "pointerup" || changed) move(e.type === "pointerup" ? at(e) : s._value, true);
+    };
+    s.addEventListener("pointerup", end);
+    s.addEventListener("pointercancel", end);
+    s.addEventListener("keydown", (e) => {
+      const d = { ArrowRight: 1, ArrowUp: 1, ArrowLeft: -1, ArrowDown: -1 }[e.key];
+      if (!d || s.classList.contains("disabled")) return;
+      e.preventDefault();
+      const { min, max, step } = s._range;
+      move(Math.min(max, Math.max(min, s._value + d * step)), true);
+    });
+  }
+
+  _setSlider(s, value) {
+    const { min, max } = s._range;
+    s._value = value;
+    const pct = max > min ? ((value - min) / (max - min)) * 100 : 0;
+    s.querySelector(".fill").style.width = `${pct}%`;
+    s.querySelector(".thumb").style.left = `${pct}%`;
+    s.setAttribute("aria-valuenow", value);
   }
 
   _setOpen(key) {
@@ -550,20 +658,43 @@ class TuyaLocalAventCard extends HTMLElement {
   // gesture is refused (Chrome pauses the video): play muted and retry at
   // the next tap anywhere.
   _applyListen() {
-    const v = this._els?.video;
-    if (!v || this._mjpeg) return;
+    const a = this._els?.audio;
+    if (!a || this._mjpeg) return;
     this._els.hint.hidden = true;
-    v.volume = this._listenVol;
-    v.muted = !this._listen;
+    a.volume = this._listenVol;
+    a.muted = !this._listen;
+    this._els.video.play?.()?.catch(() => {});
+    this._mediaSession();
     this._update();
-    v.play().catch((e) => {
-      if (e.name !== "NotAllowedError" || v.muted) return;
-      v.muted = true;
-      v.play().catch(() => {});
+    a.play().catch((e) => {
+      if (e.name !== "NotAllowedError" || a.muted) return;
+      a.muted = true;
+      a.play().catch(() => {});
       this._els.hint.hidden = false;
       document.addEventListener("pointerdown", this._unlockListen, true);
       this._update();
     });
+  }
+
+  // Lock-screen / notification entry while listening: tells the OS this page
+  // plays audio, and gives a pause (mute) control there.
+  _mediaSession() {
+    const ms = navigator.mediaSession;
+    if (!ms || !this._listen) return;
+    try {
+      const name = this._config.title || this._state(this._config.camera)?.attributes.friendly_name || "Baby monitor";
+      ms.metadata = new MediaMetadata({ title: name, artist: "Listening" });
+      ms.playbackState = "playing";
+      ms.setActionHandler("pause", () => {
+        this._listen = false;
+        this._applyListen();
+        ms.playbackState = "paused";
+      });
+      ms.setActionHandler("play", () => {
+        this._listen = true;
+        this._applyListen();
+      });
+    } catch (_) {}
   }
 
   _sliderText(key, value) {
@@ -591,13 +722,21 @@ class TuyaLocalAventCard extends HTMLElement {
       tog.disabled = m.disabled;
       tog.title = m.note || (m.on ? "Turn off" : "Turn on");
       const s = root.querySelector(`[data-slider="${key}"]`);
-      if (root.activeElement !== s) {
-        Object.assign(s, { min: m.slider.min, max: m.slider.max, step: m.slider.step });
-        s.value = m.slider.value;
-        root.querySelector(`[data-panel="${key}"] .val`).textContent = m.note ? "" : m.slider.text;
+      // Not while dragging, and a just-sent value until the entity has it.
+      const p = this._pending[key];
+      if (p && (Date.now() > p.until || p.value === m.slider.value)) delete this._pending[key];
+      if (!s._drag) {
+        s._range = { min: m.slider.min, max: m.slider.max, step: m.slider.step };
+        const v = this._pending[key]?.value ?? m.slider.value;
+        this._setSlider(s, v);
+        const val = root.querySelector(`[data-panel="${key}"] .val`);
+        if (m.note) val.textContent = "";
+        else if (this._pending[key]) this._sliderText(key, v);
+        else val.textContent = m.slider.text;
       }
-      s.disabled = !!m.slider.disabled || (key !== "talk" && key !== "listen" && m.disabled);
+      s.classList.toggle("disabled", !!m.slider.disabled || (key !== "talk" && key !== "listen" && m.disabled));
       s.hidden = !!m.note;
+      if (key === "lullaby") this._updateTrack(m.disabled);
       let note = root.querySelector(`[data-panel="${key}"] .note`);
       if (m.note && !note) {
         note = document.createElement("span");
@@ -607,6 +746,27 @@ class TuyaLocalAventCard extends HTMLElement {
       if (note) note.textContent = m.note || "";
     }
     this._renderOverlays();
+  }
+
+  // The track picker: the track entity's options, showing the current track
+  // (else the default one).
+  _updateTrack(disabled) {
+    const sel = this.shadowRoot.querySelector("[data-track]");
+    if (!sel) return;
+    const st = this._state(this._entity("lullaby_track"));
+    const options = st?.attributes.options ?? [];
+    sel.hidden = !options.length;
+    if (!options.length) return;
+    const key = options.join("\n");
+    if (sel._key !== key) {
+      sel._key = key;
+      sel.innerHTML = `<option value="" disabled>Track</option>${options.map((o) => `<option>${esc(o)}</option>`).join("")}`;
+    }
+    if (this.shadowRoot.activeElement !== sel) {
+      const cur = [st.state, this._config.default_track].find((o) => options.includes(o));
+      sel.value = cur ?? "";
+    }
+    sel.disabled = disabled || st.state === "unavailable";
   }
 
   _renderOverlays() {
@@ -672,12 +832,17 @@ class TuyaLocalAventCard extends HTMLElement {
       this._talkSender = this._config.controls.includes("talk")
         ? pc.addTransceiver("audio", { direction: "sendonly" }).sender
         : null;
+      // Video plays muted; listen audio has its own element, which keeps
+      // playing where a browser pauses a hidden video.
       const stream = new MediaStream();
+      const audio = new MediaStream();
       this._stream = stream;
+      this._audioStream = audio;
       pc.ontrack = (e) => {
-        stream.addTrack(e.track);
+        (e.track.kind === "audio" ? audio : stream).addTrack(e.track);
         if (this._els) {
           this._els.video.srcObject = stream;
+          this._els.audio.srcObject = audio;
           this._applyListen();
         }
       };
@@ -830,6 +995,7 @@ class TuyaLocalAventCard extends HTMLElement {
     }
     this._talkSender = null;
     this._stream = null;
+    this._audioStream = null;
   }
 
   // ---- talk ----
@@ -895,6 +1061,10 @@ const SCHEMA = [
       { name: "listen_volume", selector: { number: { min: 0, max: 100, step: 5, mode: "slider", unit_of_measurement: "%" } } },
       { name: "talk_volume", selector: { number: { min: 0, max: 200, step: 5, mode: "slider", unit_of_measurement: "%" } } },
       { name: "autohide", selector: { number: { min: 0, max: 60, step: 1, mode: "box", unit_of_measurement: "s" } } },
+      {
+        name: "default_track",
+        selector: { select: { mode: "dropdown", options: [{ value: "", label: "The monitor's current track" }, ...TRACKS.map((t) => ({ value: t, label: t }))] } },
+      },
     ],
   },
   {
@@ -905,6 +1075,8 @@ const SCHEMA = [
     schema: [
       { name: "night_light", selector: { entity: { domain: "light" } } },
       { name: "lullaby", selector: { entity: { domain: "select" } } },
+      { name: "lullaby_track", selector: { entity: { domain: "select" } } },
+      { name: "lullaby_playing", selector: { entity: { domain: "binary_sensor" } } },
       { name: "volume", selector: { entity: { domain: "number" } } },
     ],
   },
@@ -919,7 +1091,10 @@ const EDITOR_LABELS = {
   talk_volume: "Talk volume",
   autohide: "Hide controls after (0 = always shown)",
   night_light: "Night light",
+  default_track: "Lullaby to play (empty = the monitor's current one)",
   lullaby: "Lullaby",
+  lullaby_track: "Lullaby track",
+  lullaby_playing: "Lullaby playing",
   volume: "Lullaby volume",
   overlays: "Overlays (list of {entity, position, name, attribute, text, style})",
 };

@@ -176,6 +176,11 @@ const states = {
   "camera.nursery": st("camera.nursery", "streaming", { friendly_name: "Nursery", access_token: "harness", frontend_stream_type: "web_rtc" }),
   "light.nursery_night_light": st("light.nursery_night_light", "off", { friendly_name: "Nursery Night Light", brightness: null, supported_color_modes: ["brightness"] }),
   "select.nursery_lullaby": st("select.nursery_lullaby", "stop", { friendly_name: "Nursery Lullaby", options: ["play", "pause", "stop", "next", "prev"] }),
+  "select.nursery_lullaby_track": st("select.nursery_lullaby_track", "unknown", {
+    friendly_name: "Nursery Lullaby Track",
+    options: ["Baa Baa Black Sheep", "Brahms' Lullaby", "Rock-a-Bye Baby", "Golden Slumbers", "Hush Little Baby", "Mother's Shh", "Calming River", "Heartbeat", "Vacuum Cleaner", "White Noise", "Garden Bird Song", "Valley Wind", "Ocean Shore", "Night-time Nature", "Rain Shower"],
+  }),
+  "binary_sensor.nursery_lullaby_playing": st("binary_sensor.nursery_lullaby_playing", "unknown", { friendly_name: "Nursery Lullaby Playing", device_class: "running" }),
   "number.nursery_volume": st("number.nursery_volume", "40", { friendly_name: "Nursery Volume", min: 1, max: 100, step: 1, unit_of_measurement: "%" }),
   "sensor.nursery_temperature": st("sensor.nursery_temperature", "21.4", { friendly_name: "Nursery Temperature", unit_of_measurement: "°C", device_class: "temperature" }),
   "binary_sensor.nursery_motion": st("binary_sensor.nursery_motion", "off", { friendly_name: "Nursery Motion", device_class: "motion" }),
@@ -211,7 +216,12 @@ async function callService(domain, service, data) {
   } else if (domain === "light" && service === "turn_off") {
     setState(id, "off", { brightness: null });
   } else if (domain === "select" && service === "select_option") {
+    // As the bridge: the lullaby select stays optimistic, the monitor
+    // reports playing on 246 and a chosen track (which also plays) on 248.
     setState(id, data.option);
+    const playing = "binary_sensor.nursery_lullaby_playing";
+    if (id === "select.nursery_lullaby") setState(playing, data.option === "play" ? "on" : "off");
+    if (id === "select.nursery_lullaby_track") setState(playing, "on");
   } else if (domain === "number" && service === "set_value") {
     setState(id, data.value);
   } else {

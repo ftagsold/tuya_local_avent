@@ -3,7 +3,8 @@
 A single Rust process (plus a vendored Go video bridge) that turns a **Philips
 Avent / Tuya baby monitor** into:
 
-- a **Home Assistant** device — night light (dimmable), lullaby, volume,
+- a **Home Assistant** device — night light (dimmable), lullaby (play
+  control, track, playing state), volume,
   temperature, motion/sound alerts, privacy — over local MQTT discovery,
 - a **Lovelace card** (`card/tuya-local-avent-card.js`) with live video, talk,
   night light, lullaby and entity overlays, and
@@ -174,7 +175,14 @@ Set `ONVIF_BIND_IP` to the container's `ipv4_address`.
   `MQTT_USER`/`MQTT_PASS` (the Mosquitto add-on refuses anonymous clients);
   the entities appear via MQTT discovery. Use the broker's IP: `.local` names
   do not resolve inside the container. The night light is one dimmable light
-  (`light.turn_on` with `brightness_pct`).
+  (`light.turn_on` with `brightness_pct`). Lullaby: `select.*_lullaby`
+  (play/pause/stop/next/prev, DP 201), `select.*_lullaby_track` (the 15
+  built-in tracks; choosing one plays it, DP 202, current track from DP 248)
+  and `binary_sensor.*_lullaby_playing` (DP 246). The monitor reports no
+  state when the bridge connects, only changes, so these read `unknown`
+  until something changes; they still work. The track ids differ between
+  units (three known blocks): until the monitor has reported a track, a
+  chosen one is sent for every block and the monitor ignores the others.
 - **Home Assistant video + talk**: add the *ONVIF* integration with the
   container IP, port `8000` and the ONVIF credentials. It creates one camera;
   its stream URI carries the talkback backchannel, which HA's built-in go2rtc
@@ -208,7 +216,11 @@ Set `ONVIF_BIND_IP` to the container's `ipv4_address`.
   `autohide` seconds without interaction, but kept while a control is open
   or talk is on. Tapping a button turns the group into that control: an
   on/off toggle on the left and its slider (listen volume, night light
-  33/66/100 %, lullaby volume, talk volume). A tap on the video (or Esc)
+  33/66/100 %, lullaby volume, talk volume); the lullaby control also has a
+  track picker. Lullaby play starts `default_track`, or resumes the
+  monitor's current track when unset. Sliders are drawn by the card
+  (pointer events), so they work in the turned landscape view and on touch
+  screens, and keep a sent value until the entity reports it. A tap on the video (or Esc)
   goes back to the buttons. The MQTT entities are found on the camera's
   device; set them explicitly if HA did not merge the devices.
 - **Full screen**: the video with overlays and controls. Uses the
@@ -220,6 +232,14 @@ Set `ONVIF_BIND_IP` to the container's `ipv4_address`.
   card starts muted, shows "Tap for sound" and turns listen on at the first
   tap. To start with sound right away, allow autoplay for the HA site in the
   browser (Firefox, Safari: site settings) or in the Companion app.
+- **Background listening**: listen audio has its own `<audio>` element,
+  separate from the video, and registers a Media Session (lock-screen
+  controls). It keeps playing with the screen off only where the browser or
+  app keeps running pages in the background: Chrome on Android does; the
+  iOS Companion app and iOS Safari suspend the page on lock. Home Assistant
+  also closes its connection, and with it the stream, 5 minutes after the
+  page is hidden: turn off *Profile → Browser settings → Automatically
+  close connection* on that phone.
 - **Overlays**: other entities' states as transparent HTML text over the
   video, at a named position or at explicit `top/left/right/bottom`.
 
@@ -237,8 +257,11 @@ listen: false                # default: listen on at load
 listen_volume: 100           # default listen volume, 0-100 %
 talk_volume: 100             # default talk gain, 0-200 %
 autohide: 5                  # hide controls after N s; 0 = always shown
+default_track: Brahms' Lullaby   # lullaby play starts this; unset = current track
 # night_light: light.nursery_night_light   # optional overrides
 # lullaby: select.nursery_lullaby
+# lullaby_track: select.nursery_lullaby_track
+# lullaby_playing: binary_sensor.nursery_lullaby_playing
 # volume: number.nursery_volume
 overlays:
   - entity: sensor.nursery_temperature
