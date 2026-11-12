@@ -180,9 +180,11 @@ Set `ONVIF_BIND_IP` to the container's `ipv4_address`.
   built-in tracks; choosing one plays it, DP 202, current track from DP 248)
   and `binary_sensor.*_lullaby_playing` (DP 246). The monitor reports no
   state when the bridge connects, only changes, so these read `unknown`
-  until something changes; they still work. The track ids differ between
-  units (three known blocks): until the monitor has reported a track, a
-  chosen one is sent for every block and the monitor ignores the others.
+  until something changes; they still work. Tracks chosen on the handheld
+  unit or in the app show up too (DP 248). The track ids differ between
+  units (four known blocks): until the monitor has reported a track, a
+  chosen one is sent for every block and the monitor ignores the others. An
+  id outside the known blocks is logged (`lullaby: unknown track id`).
 - **Home Assistant video + talk**: add the *ONVIF* integration with the
   container IP, port `8000` and the ONVIF credentials. It creates one camera;
   its stream URI carries the talkback backchannel, which HA's built-in go2rtc
@@ -211,7 +213,8 @@ Set `ONVIF_BIND_IP` to the container's `ipv4_address`.
   `talk_mode: hold`. Needs HA over HTTPS (browsers grant the microphone only
   to secure pages).
 - **Controls**: a button group floating at the bottom center of the video:
-  listen, night light, lullaby, talk, full screen (each optional, in the
+  listen, night light, lullaby, talk, full screen, listen in background
+  (each optional, in the
   configured order). Hidden until the video is tapped; hidden again after
   `autohide` seconds without interaction, but kept while a control is open
   or talk is on. Tapping a button turns the group into that control: an
@@ -236,10 +239,18 @@ Set `ONVIF_BIND_IP` to the container's `ipv4_address`.
   separate from the video, and registers a Media Session (lock-screen
   controls). It keeps playing with the screen off only where the browser or
   app keeps running pages in the background: Chrome on Android does; the
-  iOS Companion app and iOS Safari suspend the page on lock. Home Assistant
-  also closes its connection, and with it the stream, 5 minutes after the
-  page is hidden: turn off *Profile → Browser settings → Automatically
-  close connection* on that phone.
+  Companion apps and iOS Safari pause the page when it is hidden. Home
+  Assistant also closes its connection, and with it the stream, 5 minutes
+  after the page is hidden: turn off *Profile → Browser settings →
+  Automatically close connection* on that phone.
+- **Listen in background** (control `background`, Android, full screen
+  only): opens Home Assistant's HLS stream of the camera (`camera/stream`,
+  a token URL that needs no login) in a media app through Android's *open
+  with* (VLC, MX Player, ...). The app keeps playing with the screen locked
+  and shows lock-screen controls; the card's own listen turns off. HLS lags
+  2-6 s and also carries the video. Needs HA's `stream` integration
+  (`default_config`). In VLC, set *Settings → Video → Background/PiP mode*
+  to *Play videos in background*.
 - **Overlays**: other entities' states as transparent HTML text over the
   video, at a named position or at explicit `top/left/right/bottom`.
 
@@ -251,7 +262,7 @@ card has a visual editor; YAML:
 type: custom:tuya-local-avent-card
 camera: camera.nursery
 title: Nursery                 # optional
-controls: [listen, night_light, lullaby, talk, fullscreen]   # shown, in order
+controls: [listen, night_light, lullaby, talk, fullscreen, background]   # shown, in order
 talk_mode: toggle            # or hold
 listen: false                # default: listen on at load
 listen_volume: 100           # default listen volume, 0-100 %

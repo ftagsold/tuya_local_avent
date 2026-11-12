@@ -65,10 +65,15 @@ pub async fn run(cfg: Config, control: Control) -> Result<()> {
             // The playing track comes back on 248 (and maybe 202): its id
             // names the track and tells which block this monitor uses.
             if u.id == dp::PLAY_CURRENT || u.id == dp::PLAY_TRACK {
-                if let Some((b, name)) = dp::current_track_id(&u.value).and_then(dp::track_by_id) {
-                    seen_block.store(b, Ordering::Relaxed);
-                    let topic = format!("{}/lullaby_track/state", base(&dev));
-                    let _ = state_client.publish(topic, QoS::AtLeastOnce, true, name).await;
+                let id = dp::current_track_id(&u.value);
+                match id.and_then(dp::track_by_id) {
+                    Some((b, name)) => {
+                        seen_block.store(b, Ordering::Relaxed);
+                        let topic = format!("{}/lullaby_track/state", base(&dev));
+                        let _ = state_client.publish(topic, QoS::AtLeastOnce, true, name).await;
+                    }
+                    // A block not in dp::TRACK_BLOCKS: log it so it can be added.
+                    None => tracing::warn!("lullaby: unknown track id in DP {}: {}", u.id, u.value),
                 }
                 continue;
             }

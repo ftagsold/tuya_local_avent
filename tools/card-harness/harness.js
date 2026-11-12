@@ -239,6 +239,9 @@ async function callWS(msg) {
       return { frontend_stream_types: $("nowebrtc").checked ? ["hls"] : ["hls", "web_rtc"] };
     case "camera/webrtc/get_client_config":
       return { configuration: { iceServers: [] } };
+    case "camera/stream":
+      // HA's HLS endpoint shape (token URL); go2rtc's HLS stands in for it.
+      return { url: `/api/hls/harness-token/master_playlist.m3u8` };
     case "camera/webrtc/candidate": {
       const s = sessions.get(msg.session_id);
       const out = JSON.stringify({ type: "webrtc/candidate", value: msg.candidate.candidate });

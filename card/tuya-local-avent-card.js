@@ -32,6 +32,10 @@
  * - Background: listen audio plays from its own <audio> element, so it keeps
  *   playing while the page is hidden or the phone is locked, where the
  *   browser or app allows it (lock-screen media controls via Media Session).
+ *   The Android Companion app pauses the page when it stops, so in full
+ *   screen on Android a button hands Home Assistant's HLS stream of the
+ *   camera (token URL, no login) to a media app such as VLC, which keeps
+ *   playing with the screen locked.
  * - Overlays: other entities' states as plain HTML text over the video.
  *
  * No build step, no dependencies: copy to /config/www and add
@@ -39,9 +43,9 @@
  */
 
 const CARD = "tuya-local-avent-card";
-const VERSION = "1.3.0";
+const VERSION = "1.4.0";
 
-const ALL_CONTROLS = ["listen", "night_light", "lullaby", "talk", "fullscreen"];
+const ALL_CONTROLS = ["listen", "night_light", "lullaby", "talk", "fullscreen", "background"];
 // Controls that open a panel (toggle + slider); the rest act on tap.
 const PANEL_CONTROLS = ["listen", "night_light", "lullaby", "talk"];
 // Names from 1.0 whose sliders now live inside their control.
@@ -52,6 +56,7 @@ const CONTROL_LABELS = {
   lullaby: "Lullaby (play/stop + track + volume)",
   talk: "Talk (on/off + talk volume)",
   fullscreen: "Full screen",
+  background: "Listen in background (full screen, Android: opens a media app)",
 };
 const LIGHT_LEVELS = [33, 66, 100];
 const ICONS = {
@@ -60,6 +65,7 @@ const ICONS = {
   lullaby: ["mdi:music", "mdi:music-off"],
   talk: ["mdi:microphone", "mdi:microphone-off"],
   fullscreen: ["mdi:fullscreen-exit", "mdi:fullscreen"],
+  background: ["mdi:headphones", "mdi:headphones"],
 };
 // The monitor's built-in tracks (the bridge's lullaby track options); the
 // editor's fallback when that entity is not found.
@@ -422,7 +428,7 @@ class TuyaLocalAventCard extends HTMLElement {
       .map((k) =>
         PANEL_CONTROLS.includes(k)
           ? `<button class="btn" data-open="${k}" title="${esc(CONTROL_LABELS[k])}">${icon(k)}</button>`
-          : `<button class="btn" data-fs title="${esc(CONTROL_LABELS[k])}">${icon(k)}</button>`,
+          : `<button class="btn" ${k === "fullscreen" ? "data-fs" : "data-bg hidden"} title="${esc(CONTROL_LABELS[k])}">${icon(k)}</button>`,
       )
       .join("");
     const panels = panelKeys
@@ -479,6 +485,7 @@ class TuyaLocalAventCard extends HTMLElement {
     for (const ev of ["pointerdown", "input"]) group.addEventListener(ev, () => this._poke());
     group.addEventListener("click", (e) => {
       if (e.target.closest("[data-fs]")) return this._toggleFullscreen();
+      if (e.target.closest("[data-bg]")) return this._listenInBackground();
       const open = e.target.closest("[data-open]");
       if (open) return this._setOpen(open.dataset.open);
       const tog = e.target.closest("[data-toggle]");
@@ -500,6 +507,8 @@ class TuyaLocalAventCard extends HTMLElement {
     track?.addEventListener("change", () => {
       const entity_id = this._entity("lullaby_track");
       if (entity_id && track.value) this._call("select", "select_option", { entity_id, option: track.value });
+      // Focus would keep _updateTrack from showing later track changes.
+      track.blur();
     });
     this._built = true;
     this._setShown(!(c.autohide > 0));
@@ -652,6 +661,32 @@ class TuyaLocalAventCard extends HTMLElement {
     } catch (_) {}
   }
 
+  _android() {
+    return /Android/i.test(navigator.userAgent);
+  }
+
+  // Hand the camera's HLS stream to a media app (Android "open with"):
+  // it plays on with the screen locked and shows lock-screen controls. The
+  // URL carries HA's stream token, so the app needs no login. The card's own
+  // listen goes off, else both play once the app is back.
+  async _listenInBackground() {
+    try {
+      const { url } = await this._hass.callWS({ type: "camera/stream", entity_id: this._config.camera, format: "hls" });
+      const u = new URL(url, location.href);
+      const title = this._config.title || this._state(this._config.camera)?.attributes.friendly_name || "Baby monitor";
+      this._listen = false;
+      this._applyListen();
+      // Navigations to intent: URIs are launched by the Companion app (and Chrome).
+      location.href =
+        `intent://${u.host}${u.pathname}${u.search}#Intent;scheme=${u.protocol.replace(":", "")};` +
+        `action=android.intent.action.VIEW;type=application/vnd.apple.mpegurl;S.title=${encodeURIComponent(title)};end`;
+    } catch (e) {
+      console.warn(CARD, "background listen", e);
+      this._setStatus(`No HLS stream from Home Assistant: ${e.message || e.code || e}`);
+      setTimeout(() => this._pc?.connectionState === "connected" && this._setStatus(""), 5000);
+    }
+  }
+
   // ---- listen ----
 
   // The video element follows the listen state. Unmuting without a user
@@ -708,6 +743,8 @@ class TuyaLocalAventCard extends HTMLElement {
     const root = this.shadowRoot;
     const fs = root.querySelector("[data-fs] ha-icon");
     if (fs) fs.setAttribute("icon", ICONS.fullscreen[this._isFullscreen() ? 0 : 1]);
+    const bg = root.querySelector("[data-bg]");
+    if (bg) bg.hidden = !(this._isFullscreen() && this._android());
     for (const key of this._config.controls) {
       if (!PANEL_CONTROLS.includes(key)) continue;
       const m = this._model(key);

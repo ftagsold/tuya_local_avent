@@ -86,9 +86,10 @@ pub static LULLABY_TRACKS: &[&str] = &[
 
 /// First track id of each block the catalogue is published under. Units of
 /// the same product report different blocks (SCD973: 3542154, firmware
-/// 1.1.12: 12072916, SCD923 1.4.0: 3219038), and a monitor ignores an id
-/// outside its own block.
-pub static TRACK_BLOCKS: &[u32] = &[3542154, 12072916, 3219038];
+/// 1.1.12: 12072916, SCD923 1.4.0: 3219038, and 11279469, captured on this
+/// project's monitor: Brahms' Lullaby = 11279470), and a monitor ignores an
+/// id outside its own block.
+pub static TRACK_BLOCKS: &[u32] = &[3542154, 12072916, 3219038, 11279469];
 
 /// The block start and track name of a DP 248 track id.
 pub fn track_by_id(id: u32) -> Option<(u32, &'static str)> {
@@ -133,6 +134,7 @@ mod tests {
         assert_eq!(track_by_id(3542155), Some((3542154, "Brahms' Lullaby")));
         assert_eq!(track_by_id(12072916 + 14), Some((12072916, "Rain Shower")));
         assert_eq!(track_by_id(3219038 + 15), None);
+        assert_eq!(track_by_id(11279476), Some((11279469, "Heartbeat")));
         assert_eq!(current_track_id(&serde_json::json!(r#"{"bizcode":"phi-no-bm","id":3542155,"errcode":0}"#)), Some(3542155));
         assert_eq!(track_value(3219038, 1), r#"{"bizcode":"phi-no-bm","id":3219039}"#);
     }
