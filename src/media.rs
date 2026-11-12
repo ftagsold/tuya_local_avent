@@ -137,7 +137,7 @@ pub fn overlay_text(device_name: &str) -> String {
         }
         name.push(c);
     }
-    format!("%{{localtime:%d-%m-%Y %H\\:%M\\:%S}} | {name}")
+    format!("%{{localtime:%Y-%m-%d %H\\:%M\\:%S}} | {name}")
 }
 
 /// Temperature overlay text (the monitor reports °C x 100): `21.5 °C`.
@@ -417,8 +417,8 @@ mod tests {
 
     #[test]
     fn overlay_text_escapes_expander_chars() {
-        assert_eq!(overlay_text("Nursery <3"), "%{localtime:%d-%m-%Y %H\\:%M\\:%S} | Nursery <3");
-        assert_eq!(overlay_text("50% {x}"), "%{localtime:%d-%m-%Y %H\\:%M\\:%S} | 50\\% \\{x\\}");
+        assert_eq!(overlay_text("Nursery <3"), "%{localtime:%Y-%m-%d %H\\:%M\\:%S} | Nursery <3");
+        assert_eq!(overlay_text("50% {x}"), "%{localtime:%Y-%m-%d %H\\:%M\\:%S} | 50\\% \\{x\\}");
     }
 
     #[test]

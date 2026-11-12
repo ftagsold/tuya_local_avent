@@ -21,7 +21,7 @@ touched; the bridge logs in only if the monitor rejects that password.
 |---|---|
 | Local 3.3 LAN session, control + sensor pushes | built |
 | Fully-local video (3.3 LAN signalling) | **working** — `h264 1280x720`, no cloud |
-| Overlay `dd-mm-yyyy hh:mm:ss \| <name>`, H.264 + AAC | **working** |
+| Overlay `yyyy-mm-dd hh:mm:ss \| <name>`, H.264 + AAC | **working** |
 | Authenticated RTSP (go2rtc), no open stream | **working** |
 | Talkback (monitor speaker) over the LAN | **working** end to end via HA's go2rtc (tested with a silent mic; audibility not yet checked) |
 | P2P password from env, cloud fallback on rejection | **working** |
@@ -246,9 +246,9 @@ Set `ONVIF_BIND_IP` to the container's `ipv4_address`.
   Assistant also closes its connection, and with it the stream, 5 minutes
   after the page is hidden: turn off *Profile → Browser settings →
   Automatically close connection* on that phone.
-- **Listen in background** (control `background`, Android Companion app,
-  full screen only; a browser needs no hand-off): opens Home Assistant's
-  own HLS stream of the camera in VLC, named after the stream (the camera's
+- **Listen in background** (control `background`, shown on Android): opens
+  Home Assistant's own HLS stream of the camera in VLC, in VLC's own task
+  (its own entry in recent apps), named after the stream (the camera's
   device). The URL carries HA's stream token, so VLC needs no login, and it
   works wherever HA does (remote access included). The card's own listen
   turns off. Without VLC, the Companion app opens its store page. One-time

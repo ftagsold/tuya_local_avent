@@ -34,7 +34,7 @@
  *   browser it keeps playing with the phone locked (lock-screen controls via
  *   Media Session), but only if the card was in full screen; otherwise it is
  *   muted while the page is hidden. The Android Companion app pauses the
- *   page when it stops, so there, in full screen, a button opens Home
+ *   page when it stops, so on Android a button opens Home
  *   Assistant's own HLS stream of the camera (token URL, no login) in VLC,
  *   named after the stream. VLC keeps playing it as audio with the screen
  *   locked once its Background/PiP mode is "Play videos in background".
@@ -48,7 +48,7 @@
  */
 
 const CARD = "tuya-local-avent-card";
-const VERSION = "1.7.0";
+const VERSION = "1.8.0";
 
 const ALL_CONTROLS = ["listen", "night_light", "lullaby", "talk", "fullscreen", "background"];
 // Controls that open a panel (toggle + slider); the rest act on tap.
@@ -61,7 +61,7 @@ const CONTROL_LABELS = {
   lullaby: "Lullaby (play/stop + track + timer + volume)",
   talk: "Talk (on/off + talk volume)",
   fullscreen: "Full screen",
-  background: "Listen in background (full screen, Android Companion app: opens VLC)",
+  background: "Listen in background (Android: opens VLC)",
 };
 const LIGHT_LEVELS = [33, 66, 100];
 const ICONS = {
@@ -703,11 +703,10 @@ class TuyaLocalAventCard extends HTMLElement {
     } catch (_) {}
   }
 
-  // The Android Companion app (its WebView adds "Home Assistant/<version>").
-  // A browser keeps the page's own sound playing; only the app needs a
-  // media app to hand it to.
-  _companion() {
-    return /Android/i.test(navigator.userAgent) && /Home Assistant\//.test(navigator.userAgent);
+  // VLC hand-off: Android only (the Companion app and browsers launch
+  // intent: links).
+  _android() {
+    return /Android/i.test(navigator.userAgent);
   }
 
   // Hand the camera to VLC: it plays on with the screen locked and shows
@@ -726,7 +725,9 @@ class TuyaLocalAventCard extends HTMLElement {
       // Navigations to intent: URIs are launched by the Companion app.
       location.href =
         `intent://${u.host}${u.pathname}${u.search}#Intent;scheme=${u.protocol.replace(":", "")};` +
-        `package=org.videolan.vlc;action=android.intent.action.VIEW;type=video/*;` +
+        // NEW_TASK: VLC gets its own task (its own entry in recent apps)
+        // instead of opening inside the Companion app's.
+        `package=org.videolan.vlc;action=android.intent.action.VIEW;type=video/*;launchFlags=0x10000000;` +
         `S.title=${encodeURIComponent(this._streamName())};end`;
     } catch (e) {
       console.warn(CARD, "background listen", e);
@@ -799,7 +800,7 @@ class TuyaLocalAventCard extends HTMLElement {
     const fs = root.querySelector("[data-fs] ha-icon");
     if (fs) fs.setAttribute("icon", ICONS.fullscreen[this._isFullscreen() ? 0 : 1]);
     const bg = root.querySelector("[data-bg]");
-    if (bg) bg.hidden = !(this._isFullscreen() && this._companion());
+    if (bg) bg.hidden = !this._android();
     for (const key of this._config.controls) {
       if (!PANEL_CONTROLS.includes(key)) continue;
       const m = this._model(key);

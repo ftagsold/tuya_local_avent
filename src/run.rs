@@ -2,7 +2,7 @@
 //!
 //! Video: the Go bridge pulls the monitor's stream over the LAN and serves it
 //! on loopback only (random credentials); ffmpeg burns a live
-//! `dd-mm-yyyy hh:mm:ss | <device name>` overlay, re-encodes to H.264 + AAC and
+//! `yyyy-mm-dd hh:mm:ss | <device name>` overlay, re-encodes to H.264 + AAC and
 //! publishes into go2rtc, the one RTSP server reachable from the LAN, which
 //! requires `RTSP_USER`/`RTSP_PASS` off loopback. ONVIF points UniFi Protect
 //! and Home Assistant at that stream; its URI also carries the talkback
