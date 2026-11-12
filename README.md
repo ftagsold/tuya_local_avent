@@ -177,8 +177,10 @@ Set `ONVIF_BIND_IP` to the container's `ipv4_address`.
   do not resolve inside the container. The night light is one dimmable light
   (`light.turn_on` with `brightness_pct`). Lullaby: `select.*_lullaby`
   (play/pause/stop/next/prev, DP 201), `select.*_lullaby_track` (the 15
-  built-in tracks; choosing one plays it, DP 202, current track from DP 248)
-  and `binary_sensor.*_lullaby_playing` (DP 246). The monitor reports no
+  built-in tracks; choosing one plays it, DP 202, current track from DP 248),
+  `binary_sensor.*_lullaby_playing` (DP 246) and `select.*_lullaby_timer`
+  (auto-stop after 5/10/20/30/60/90 min or `Forever`: DP 244 seconds + DP
+  243 on/off; a length set elsewhere shows as the nearest option). The monitor reports no
   state when the bridge connects, only changes, so these read `unknown`
   until something changes; they still work. Tracks chosen on the handheld
   unit or in the app show up too (DP 248). The track ids differ between
@@ -244,15 +246,57 @@ Set `ONVIF_BIND_IP` to the container's `ipv4_address`.
   after the page is hidden: turn off *Profile → Browser settings →
   Automatically close connection* on that phone.
 - **Listen in background** (control `background`, Android, full screen
-  only): opens Home Assistant's HLS stream of the camera (`camera/stream`,
-  a token URL that needs no login) in a media app through Android's *open
-  with* (VLC, MX Player, ...). The app keeps playing with the screen locked
-  and shows lock-screen controls; the card's own listen turns off. HLS lags
-  2-6 s and also carries the video. Needs HA's `stream` integration
-  (`default_config`). In VLC, set *Settings → Video → Background/PiP mode*
-  to *Play videos in background*.
+  only): opens the camera's sound alone in a media app through Android's
+  *open with* (VLC, ...). Plain audio, so the app keeps playing with the
+  screen locked and shows lock-screen controls; the card's own listen turns
+  off. The audio comes from the `tuya_local_avent` Home Assistant
+  integration (below) through Home Assistant's own URL, so it works
+  wherever Home Assistant does (remote access included, over HTTPS).
+  Without the integration the card falls back to Home Assistant's HLS
+  stream (video too; players may pause it on lock).
+
+### Home Assistant integration (background listen)
+
+`custom_components/tuya_local_avent` adds one view,
+`/api/tuya_local_avent/listen/<camera entity>`: the camera's first audio
+track as ADTS AAC (64 kbit/s mono, one ffmpeg per listener, at most 4,
+ended when the player hangs up). Security:
+
+- the view requires Home Assistant authentication and read access to that
+  camera entity;
+- the card hands the media app a path signed with `auth/sign_path`: valid
+  12 h, only for that exact path, and bound to the signing user's refresh
+  token (log out or revoke the token and the link dies);
+- nothing new listens on the network: it is Home Assistant's own HTTPS URL.
+
+A signed link is a key to listen while it is valid: it lives only in the
+media app. Install (NixOS):
+
+```nix
+services.home-assistant.customComponents = [
+  (pkgs.buildHomeAssistantComponent {
+    owner = "ftagsold";
+    domain = "tuya_local_avent";
+    version = "1.0.0";
+    src = pkgs.fetchFromGitHub {
+      owner = "ftagsold";
+      repo = "tuya_local_avent";
+      rev = "<commit>";
+      hash = "<nix hash>";
+    };
+  })
+];
+services.home-assistant.config.tuya_local_avent = {};
+```
+
+Elsewhere: copy `custom_components/tuya_local_avent` into
+`/config/custom_components/`, add `tuya_local_avent:` to
+`configuration.yaml`, restart.
 - **Overlays**: other entities' states as transparent HTML text over the
-  video, at a named position or at explicit `top/left/right/bottom`.
+  video. The editor has a picker (with search) per corner: top right,
+  bottom left, bottom right (`overlay_top_right` etc.). The `overlays`
+  YAML list adds more, at a named position or at explicit
+  `top/left/right/bottom`.
 
 Install: copy the file to `/config/www/`, then *Settings → Dashboards → ⋮ →
 Resources → Add* `/local/tuya-local-avent-card.js` (JavaScript module). The
@@ -269,6 +313,10 @@ listen_volume: 100           # default listen volume, 0-100 %
 talk_volume: 100             # default talk gain, 0-200 %
 autohide: 5                  # hide controls after N s; 0 = always shown
 default_track: Brahms' Lullaby   # lullaby play starts this; unset = current track
+default_timer: 30 min        # set before play: 5|10|20|30|60|90 min, Forever
+overlay_top_right: sensor.nursery_temperature   # corner overlays (editor pickers)
+overlay_bottom_left: binary_sensor.nursery_motion
+# overlay_bottom_right: ...
 # night_light: light.nursery_night_light   # optional overrides
 # lullaby: select.nursery_lullaby
 # lullaby_track: select.nursery_lullaby_track

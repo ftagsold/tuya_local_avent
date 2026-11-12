@@ -55,6 +55,8 @@ pub async fn run(cfg: Config, control: Control) -> Result<()> {
     let dev = cfg.device_id.clone();
     let seen_block = block.clone();
     tokio::spawn(async move {
+        // Timer state arrives as two DPs: switch (243) and length (244).
+        let (mut timer_on, mut timer_secs) = (None::<bool>, None::<i64>);
         loop {
             // Lagged (a burst outran us) only skips; only Closed ends this.
             let u = match updates.recv().await {
@@ -74,6 +76,24 @@ pub async fn run(cfg: Config, control: Control) -> Result<()> {
                     }
                     // A block not in dp::TRACK_BLOCKS: log it so it can be added.
                     None => tracing::warn!("lullaby: unknown track id in DP {}: {}", u.id, u.value),
+                }
+                continue;
+            }
+            if u.id == dp::TIMER_SWITCH || u.id == dp::TIMER_SECS {
+                if u.id == dp::TIMER_SWITCH {
+                    timer_on = u.value.as_bool();
+                } else {
+                    timer_secs = u.value.as_i64();
+                }
+                // Off needs no length; on needs both.
+                let option = match (timer_on, timer_secs) {
+                    (Some(false), _) => Some(dp::TIMER_FOREVER),
+                    (Some(true), Some(secs)) => Some(dp::timer_option(true, secs)),
+                    _ => None,
+                };
+                if let Some(o) = option {
+                    let topic = format!("{}/lullaby_timer/state", base(&dev));
+                    let _ = state_client.publish(topic, QoS::AtLeastOnce, true, o).await;
                 }
                 continue;
             }
@@ -160,7 +180,7 @@ async fn publish_discovery(client: &AsyncClient, cfg: &Config) -> Result<()> {
             Kind::Light => ("light", light_config(cfg)),
             Kind::Brightness => continue, // part of the light
             Kind::Number => ("number", json!({ "min": d.min, "max": d.max, "command_topic": cmd_topic(cfg, d.slug), "unit_of_measurement": d.unit })),
-            Kind::Select | Kind::Track => ("select", json!({ "options": d.options, "command_topic": cmd_topic(cfg, d.slug) })),
+            Kind::Select | Kind::Track | Kind::Timer => ("select", json!({ "options": d.options, "command_topic": cmd_topic(cfg, d.slug) })),
             Kind::Sensor => ("sensor", json!({ "unit_of_measurement": d.unit, "device_class": d.device_class })),
             Kind::BinarySensor => {
                 let mut c = json!({ "device_class": d.device_class, "payload_on": "true", "payload_off": "false" });
@@ -180,6 +200,11 @@ async fn publish_discovery(client: &AsyncClient, cfg: &Config) -> Result<()> {
         let topic = format!("homeassistant/{component}/avent_{}/{}/config", cfg.device_id, d.slug);
         client.publish(topic, QoS::AtLeastOnce, true, config.to_string()).await?;
     }
+    // A LAN "Listen URL" sensor existed briefly (unreleased): clear it and
+    // its retained state, which held an access token.
+    let topic = format!("homeassistant/sensor/avent_{}/listen_url/config", cfg.device_id);
+    client.publish(topic, QoS::AtLeastOnce, true, "").await?;
+    client.publish(format!("{}/listen_url/state", base(&cfg.device_id)), QoS::AtLeastOnce, true, "").await?;
     Ok(())
 }
 
@@ -229,7 +254,7 @@ fn state_payload(d: &dp::Dp, raw: &Value) -> String {
             Some(n) => format!("{n}"),
             None => raw.as_str().unwrap_or("").to_string(),
         },
-        Kind::Select | Kind::Track => raw.as_str().unwrap_or("").to_string(),
+        Kind::Select | Kind::Track | Kind::Timer => raw.as_str().unwrap_or("").to_string(),
     }
 }
 
@@ -270,6 +295,20 @@ async fn handle_command(cfg: &Config, control: &Control, block: &Arc<AtomicU32>,
             });
             return Ok(());
         }
+        Kind::Timer => {
+            if !d.options.contains(&value) {
+                tracing::warn!("MQTT {slug}: ignoring unknown timer {value:?}");
+                return Ok(());
+            }
+            let control = control.clone();
+            let secs = dp::timer_secs(value);
+            tokio::spawn(async move {
+                if let Err(e) = set_timer(&control, secs).await {
+                    tracing::warn!("lullaby timer: {e:#}");
+                }
+            });
+            return Ok(());
+        }
         _ => return Ok(()),
     };
     let mut dps = BTreeMap::new();
@@ -298,6 +337,20 @@ async fn play_track(control: &Control, known: u32, index: usize) -> Result<()> {
     }
     let mut dps = BTreeMap::new();
     dps.insert(dp::PLAY_CONTROL.to_string(), json!("play"));
+    control.write(dps).await
+}
+
+/// Set the lullaby timer: length (244), then switch on (243), or just the
+/// switch off for "Forever". One DP per write, as for the track.
+async fn set_timer(control: &Control, secs: Option<i64>) -> Result<()> {
+    if let Some(secs) = secs {
+        let mut dps = BTreeMap::new();
+        dps.insert(dp::TIMER_SECS.to_string(), json!(secs));
+        control.write(dps).await?;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    let mut dps = BTreeMap::new();
+    dps.insert(dp::TIMER_SWITCH.to_string(), json!(secs.is_some()));
     control.write(dps).await
 }
 

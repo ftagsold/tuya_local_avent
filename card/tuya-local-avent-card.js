@@ -16,8 +16,9 @@
  *   (on/off toggle + slider); a tap on the video returns to the buttons. The
  *   night light, lullaby, lullaby track, lullaby playing and volume are the
  *   bridge's MQTT entities, found on the camera's device unless set
- *   explicitly. The lullaby panel also picks the track; play starts the
- *   configured `default_track`, or resumes the monitor's current one.
+ *   explicitly. The lullaby panel also picks the track and the auto-stop
+ *   timer; play first sets `default_timer`, then starts `default_track` (or
+ *   resumes the monitor's current track).
  * - Sliders: drawn by the card (pointer events), not <input type=range>:
  *   they follow the turned landscape stage and hold a sent value until the
  *   entity reports it, so a state update does not jump the thumb back.
@@ -33,17 +34,21 @@
  *   playing while the page is hidden or the phone is locked, where the
  *   browser or app allows it (lock-screen media controls via Media Session).
  *   The Android Companion app pauses the page when it stops, so in full
- *   screen on Android a button hands Home Assistant's HLS stream of the
- *   camera (token URL, no login) to a media app such as VLC, which keeps
- *   playing with the screen locked.
- * - Overlays: other entities' states as plain HTML text over the video.
+ *   screen on Android a button hands the camera's sound to a media app
+ *   such as VLC, which plays audio on with the screen locked. The stream is
+ *   the tuya_local_avent integration's audio-only view, through Home
+ *   Assistant's own URL (works remotely), as a path signed for this user
+ *   (`auth/sign_path`, LISTEN_SIGN_S). Without the integration: Home
+ *   Assistant's HLS stream (video too, which players may pause on lock).
+ * - Overlays: other entities' states as plain HTML text over the video:
+ *   the editor's three corner pickers, plus the `overlays` YAML list.
  *
  * No build step, no dependencies: copy to /config/www and add
  * /local/tuya-local-avent-card.js as a dashboard resource (JavaScript module).
  */
 
 const CARD = "tuya-local-avent-card";
-const VERSION = "1.4.0";
+const VERSION = "1.5.0";
 
 const ALL_CONTROLS = ["listen", "night_light", "lullaby", "talk", "fullscreen", "background"];
 // Controls that open a panel (toggle + slider); the rest act on tap.
@@ -53,7 +58,7 @@ const LEGACY_CONTROLS = ["lullaby_volume", "talk_volume"];
 const CONTROL_LABELS = {
   listen: "Listen (mute + volume)",
   night_light: "Night light (on/off + 33 / 66 / 100 %)",
-  lullaby: "Lullaby (play/stop + track + volume)",
+  lullaby: "Lullaby (play/stop + track + timer + volume)",
   talk: "Talk (on/off + talk volume)",
   fullscreen: "Full screen",
   background: "Listen in background (full screen, Android: opens a media app)",
@@ -74,6 +79,13 @@ const TRACKS = [
   "Mother's Shh", "Calming River", "Heartbeat", "Vacuum Cleaner", "White Noise",
   "Garden Bird Song", "Valley Wind", "Ocean Shore", "Night-time Nature", "Rain Shower",
 ];
+// How long a signed listen link (handed to a media app) stays valid: one
+// night. The app reconnects with it after a network drop.
+const LISTEN_SIGN_S = 12 * 3600;
+// The bridge's lullaby timer options.
+const TIMERS = ["5 min", "10 min", "20 min", "30 min", "60 min", "90 min", "Forever"];
+// Editor corner pickers: config key -> overlay position.
+const CORNERS = { overlay_top_right: "top-right", overlay_bottom_left: "bottom-left", overlay_bottom_right: "bottom-right" };
 // A slider value sent to an entity wins over its state for this long, or
 // until the state matches.
 const PENDING_MS = 5000;
@@ -98,6 +110,7 @@ const AUTO = {
   lullaby: { domain: "select", suffix: "lullaby" },
   lullaby_track: { domain: "select", suffix: "lullaby_track" },
   lullaby_playing: { domain: "binary_sensor", suffix: "lullaby_playing" },
+  lullaby_timer: { domain: "select", suffix: "lullaby_timer" },
   volume: { domain: "number", suffix: "volume" },
 };
 
@@ -136,6 +149,7 @@ const STYLE = `
   .group.away { opacity: 0; pointer-events: none; }
   .group[hidden], .group [hidden] { display: none !important; }
   .group.open { width: min(440px, calc(100% - 24px)); }
+  .group.open.wide { width: min(600px, calc(100% - 24px)); }
   .btn { flex: 0 0 auto; width: 44px; height: 44px; border-radius: 50%; border: 0; padding: 0;
     display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
     background: rgba(255, 255, 255, .12); color: #fff; transition: background .15s, transform .1s;
@@ -156,7 +170,7 @@ const STYLE = `
     background: #fff; box-shadow: 0 1px 4px rgba(0, 0, 0, .45); }
   .slider:focus-visible .thumb { box-shadow: 0 0 0 3px var(--primary-color, #03a9f4); }
   .slider.disabled { opacity: .4; pointer-events: none; }
-  .panel select { flex: 0 1 auto; min-width: 0; max-width: 42%; height: 32px; padding: 0 8px; border: 0; border-radius: 999px;
+  .panel select { flex: 0 1 auto; min-width: 0; max-width: 38%; height: 32px; padding: 0 8px; border: 0; border-radius: 999px;
     background: rgba(255, 255, 255, .12); color: #fff; font: inherit; font-size: 13px; text-overflow: ellipsis; }
   .panel select option { color: #000; }
   .panel .val { flex: 0 0 auto; min-width: 3.2em; text-align: right; font-size: 13px;
@@ -212,8 +226,13 @@ class TuyaLocalAventCard extends HTMLElement {
 
   setConfig(config) {
     if (!config || !config.camera) throw new Error("camera is required (the ONVIF camera entity)");
-    const overlays = config.overlays ?? [];
-    if (!Array.isArray(overlays)) throw new Error("overlays must be a list");
+    if (config.overlays !== undefined && !Array.isArray(config.overlays)) throw new Error("overlays must be a list");
+    const overlays = [
+      ...(config.overlays ?? []),
+      ...Object.entries(CORNERS)
+        .filter(([k]) => config[k])
+        .map(([k, position]) => ({ entity: config[k], position })),
+    ];
     const controls = (config.controls ?? ALL_CONTROLS).filter((c) => !LEGACY_CONTROLS.includes(c));
     const bad = controls.filter((c) => !ALL_CONTROLS.includes(c));
     if (bad.length) throw new Error(`unknown controls: ${bad.join(", ")} (use ${ALL_CONTROLS.join(", ")})`);
@@ -383,10 +402,18 @@ class TuyaLocalAventCard extends HTMLElement {
         break;
       }
       case "lullaby": {
+        if (m.on) {
+          this._call("select", "select_option", { entity_id: this._entity("lullaby"), option: "stop" });
+          break;
+        }
+        // Timer before play: the monitor starts its countdown with the track.
+        const timer = this._entity("lullaby_timer");
         const track = this._entity("lullaby_track");
-        const def = this._config.default_track;
-        if (!m.on && def && track) this._call("select", "select_option", { entity_id: track, option: def });
-        else this._call("select", "select_option", { entity_id: this._entity("lullaby"), option: m.on ? "stop" : "play" });
+        const { default_timer: t, default_track: def } = this._config;
+        (t && timer ? this._call("select", "select_option", { entity_id: timer, option: t }) : Promise.resolve()).then(() => {
+          if (def && track) this._call("select", "select_option", { entity_id: track, option: def });
+          else this._call("select", "select_option", { entity_id: this._entity("lullaby"), option: "play" });
+        });
         break;
       }
       case "talk":
@@ -435,7 +462,7 @@ class TuyaLocalAventCard extends HTMLElement {
       .map(
         (k) => `<div class="panel" data-panel="${k}" hidden>
           <button class="btn" data-toggle="${k}">${icon(k)}</button>
-          ${k === "lullaby" ? `<select data-track aria-label="Lullaby track" hidden></select>` : ""}
+          ${k === "lullaby" ? `<select data-pick="lullaby_track" aria-label="Lullaby track" hidden></select><select data-pick="lullaby_timer" aria-label="Lullaby timer" hidden></select>` : ""}
           <div class="slider" data-slider="${k}" role="slider" tabindex="0" aria-label="${esc(CONTROL_LABELS[k])}">
             <div class="rail"><div class="fill"></div><div class="thumb"></div></div>
           </div>
@@ -503,13 +530,14 @@ class TuyaLocalAventCard extends HTMLElement {
       }
     }
     for (const s of group.querySelectorAll("[data-slider]")) this._bindSlider(s);
-    const track = group.querySelector("[data-track]");
-    track?.addEventListener("change", () => {
-      const entity_id = this._entity("lullaby_track");
-      if (entity_id && track.value) this._call("select", "select_option", { entity_id, option: track.value });
-      // Focus would keep _updateTrack from showing later track changes.
-      track.blur();
-    });
+    for (const sel of group.querySelectorAll("[data-pick]")) {
+      sel.addEventListener("change", () => {
+        const entity_id = this._entity(sel.dataset.pick);
+        if (entity_id && sel.value) this._call("select", "select_option", { entity_id, option: sel.value });
+        // Focus would keep _updatePick from showing later changes.
+        sel.blur();
+      });
+    }
     this._built = true;
     this._setShown(!(c.autohide > 0));
     this._setOpen(null);
@@ -575,6 +603,7 @@ class TuyaLocalAventCard extends HTMLElement {
     if (!this._els) return;
     this._els.main.hidden = !!key;
     this._els.group.classList.toggle("open", !!key);
+    this._els.group.classList.toggle("wide", key === "lullaby");
     for (const p of this._els.group.querySelectorAll("[data-panel]")) p.hidden = p.dataset.panel !== key;
     if (!key) this._rearm();
     this._update();
@@ -665,13 +694,23 @@ class TuyaLocalAventCard extends HTMLElement {
     return /Android/i.test(navigator.userAgent);
   }
 
-  // Hand the camera's HLS stream to a media app (Android "open with"):
-  // it plays on with the screen locked and shows lock-screen controls. The
-  // URL carries HA's stream token, so the app needs no login. The card's own
+  // Hand the listen audio to a media app (Android "open with"): it plays on
+  // with the screen locked and shows lock-screen controls. Preferred: the
+  // tuya_local_avent integration's audio-only view, signed for this user.
+  // Fallback: HA's HLS stream (stream token, video too). The card's own
   // listen goes off, else both play once the app is back.
   async _listenInBackground() {
     try {
-      const { url } = await this._hass.callWS({ type: "camera/stream", entity_id: this._config.camera, format: "hls" });
+      let url;
+      let type = "audio/aac";
+      if (this._hass.config?.components?.includes("tuya_local_avent")) {
+        const path = `/api/tuya_local_avent/listen/${encodeURIComponent(this._config.camera)}`;
+        url = (await this._hass.callWS({ type: "auth/sign_path", path, expires: LISTEN_SIGN_S })).path;
+      } else {
+        console.info(CARD, "tuya_local_avent integration not loaded: background listen uses HLS (video too)");
+        url = (await this._hass.callWS({ type: "camera/stream", entity_id: this._config.camera, format: "hls" })).url;
+        type = "application/vnd.apple.mpegurl";
+      }
       const u = new URL(url, location.href);
       const title = this._config.title || this._state(this._config.camera)?.attributes.friendly_name || "Baby monitor";
       this._listen = false;
@@ -679,7 +718,7 @@ class TuyaLocalAventCard extends HTMLElement {
       // Navigations to intent: URIs are launched by the Companion app (and Chrome).
       location.href =
         `intent://${u.host}${u.pathname}${u.search}#Intent;scheme=${u.protocol.replace(":", "")};` +
-        `action=android.intent.action.VIEW;type=application/vnd.apple.mpegurl;S.title=${encodeURIComponent(title)};end`;
+        `action=android.intent.action.VIEW;type=${type};S.title=${encodeURIComponent(title)};end`;
     } catch (e) {
       console.warn(CARD, "background listen", e);
       this._setStatus(`No HLS stream from Home Assistant: ${e.message || e.code || e}`);
@@ -773,7 +812,10 @@ class TuyaLocalAventCard extends HTMLElement {
       }
       s.classList.toggle("disabled", !!m.slider.disabled || (key !== "talk" && key !== "listen" && m.disabled));
       s.hidden = !!m.note;
-      if (key === "lullaby") this._updateTrack(m.disabled);
+      if (key === "lullaby") {
+        this._updatePick("lullaby_track", "Track", this._config.default_track, m.disabled);
+        this._updatePick("lullaby_timer", "Timer", this._config.default_timer, m.disabled);
+      }
       let note = root.querySelector(`[data-panel="${key}"] .note`);
       if (m.note && !note) {
         note = document.createElement("span");
@@ -785,22 +827,22 @@ class TuyaLocalAventCard extends HTMLElement {
     this._renderOverlays();
   }
 
-  // The track picker: the track entity's options, showing the current track
-  // (else the default one).
-  _updateTrack(disabled) {
-    const sel = this.shadowRoot.querySelector("[data-track]");
+  // A lullaby picker (track, timer): the entity's options, showing its state
+  // (else the configured default).
+  _updatePick(key, placeholder, fallback, disabled) {
+    const sel = this.shadowRoot.querySelector(`[data-pick="${key}"]`);
     if (!sel) return;
-    const st = this._state(this._entity("lullaby_track"));
+    const st = this._state(this._entity(key));
     const options = st?.attributes.options ?? [];
     sel.hidden = !options.length;
     if (!options.length) return;
-    const key = options.join("\n");
-    if (sel._key !== key) {
-      sel._key = key;
-      sel.innerHTML = `<option value="" disabled>Track</option>${options.map((o) => `<option>${esc(o)}</option>`).join("")}`;
+    const list = options.join("\n");
+    if (sel._key !== list) {
+      sel._key = list;
+      sel.innerHTML = `<option value="" disabled>${placeholder}</option>${options.map((o) => `<option>${esc(o)}</option>`).join("")}`;
     }
     if (this.shadowRoot.activeElement !== sel) {
-      const cur = [st.state, this._config.default_track].find((o) => options.includes(o));
+      const cur = [st.state, fallback].find((o) => options.includes(o));
       sel.value = cur ?? "";
     }
     sel.disabled = disabled || st.state === "unavailable";
@@ -1102,6 +1144,10 @@ const SCHEMA = [
         name: "default_track",
         selector: { select: { mode: "dropdown", options: [{ value: "", label: "The monitor's current track" }, ...TRACKS.map((t) => ({ value: t, label: t }))] } },
       },
+      {
+        name: "default_timer",
+        selector: { select: { mode: "dropdown", options: [{ value: "", label: "The monitor's current timer" }, ...TIMERS.map((t) => ({ value: t, label: t }))] } },
+      },
     ],
   },
   {
@@ -1114,10 +1160,25 @@ const SCHEMA = [
       { name: "lullaby", selector: { entity: { domain: "select" } } },
       { name: "lullaby_track", selector: { entity: { domain: "select" } } },
       { name: "lullaby_playing", selector: { entity: { domain: "binary_sensor" } } },
+      { name: "lullaby_timer", selector: { entity: { domain: "select" } } },
       { name: "volume", selector: { entity: { domain: "number" } } },
     ],
   },
-  { name: "overlays", selector: { object: {} } },
+  {
+    type: "expandable",
+    name: "overlay_corners",
+    flatten: true,
+    expanded: true,
+    title: "Overlays (entity state shown in a corner)",
+    schema: Object.keys(CORNERS).map((name) => ({ name, selector: { entity: {} } })),
+  },
+  {
+    type: "expandable",
+    name: "advanced",
+    flatten: true,
+    title: "More overlays (YAML)",
+    schema: [{ name: "overlays", selector: { object: {} } }],
+  },
 ];
 const EDITOR_LABELS = {
   camera: "Camera (ONVIF)",
@@ -1129,6 +1190,11 @@ const EDITOR_LABELS = {
   autohide: "Hide controls after (0 = always shown)",
   night_light: "Night light",
   default_track: "Lullaby to play (empty = the monitor's current one)",
+  default_timer: "Lullaby timer (empty = the monitor's current one)",
+  lullaby_timer: "Lullaby timer",
+  overlay_top_right: "Top right",
+  overlay_bottom_left: "Bottom left",
+  overlay_bottom_right: "Bottom right",
   lullaby: "Lullaby",
   lullaby_track: "Lullaby track",
   lullaby_playing: "Lullaby playing",

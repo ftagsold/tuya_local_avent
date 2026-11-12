@@ -11,6 +11,7 @@ pub enum Kind {
     Number,    // slider
     Select,    // enum
     Track,     // lullaby track picker: names out, DP 202 ids in, state from DP 248
+    Timer,     // lullaby auto-stop: DP 244 seconds + DP 243 on/off as one select
     Sensor,    // read-only value
     BinarySensor, // read-only event (motion/sound)
 }
@@ -46,6 +47,7 @@ pub static DPS: &[Dp] = &[
     Dp { min: 1.0, max: 100.0, unit: "%", ..dp(158, "brightness", "Brightness", Kind::Brightness) },
     Dp { options: &["play", "pause", "stop", "next", "prev"], ..dp(201, "lullaby", "Lullaby", Kind::Select) },
     Dp { options: LULLABY_TRACKS, ..dp(202, "lullaby_track", "Lullaby Track", Kind::Track) },
+    Dp { options: TIMER_OPTIONS, ..dp(244, "lullaby_timer", "Lullaby Timer", Kind::Timer) },
     Dp { device_class: "running", on_value: "playing", writable: false, ..dp(246, "lullaby_playing", "Lullaby Playing", Kind::BinarySensor) },
     Dp { options: &["loop", "loop1", "shuffle"], ..dp(203, "play_mode", "Play Mode", Kind::Select) },
     Dp { min: 1.0, max: 100.0, unit: "%", ..dp(209, "volume", "Volume", Kind::Number) },
@@ -86,10 +88,10 @@ pub static LULLABY_TRACKS: &[&str] = &[
 
 /// First track id of each block the catalogue is published under. Units of
 /// the same product report different blocks (SCD973: 3542154, firmware
-/// 1.1.12: 12072916, SCD923 1.4.0: 3219038, and 11279469, captured on this
-/// project's monitor: Brahms' Lullaby = 11279470), and a monitor ignores an
-/// id outside its own block.
-pub static TRACK_BLOCKS: &[u32] = &[3542154, 12072916, 3219038, 11279469];
+/// 1.1.12: 12072916, SCD923 1.4.0: 3219038, and 11279468 on this project's
+/// monitor, which accepts exactly 11279468-11279482), and a monitor ignores
+/// an id outside its own block.
+pub static TRACK_BLOCKS: &[u32] = &[3542154, 12072916, 3219038, 11279468];
 
 /// The block start and track name of a DP 248 track id.
 pub fn track_by_id(id: u32) -> Option<(u32, &'static str)> {
@@ -109,6 +111,32 @@ pub fn current_track_id(raw: &serde_json::Value) -> Option<u32> {
         other => other.clone(),
     };
     v.get("id")?.as_u64().and_then(|n| u32::try_from(n).ok())
+}
+
+/// Lullaby auto-stop: DP 243 switches it, DP 244 holds its length (seconds,
+/// up to 5400). "Forever" is the switch off.
+pub const TIMER_SWITCH: u32 = 243;
+pub const TIMER_SECS: u32 = 244;
+pub static TIMER_OPTIONS: &[&str] = &["5 min", "10 min", "20 min", "30 min", "60 min", "90 min", "Forever"];
+pub const TIMER_FOREVER: &str = "Forever";
+
+/// Seconds for a timer option; None for "Forever" (or unknown).
+pub fn timer_secs(option: &str) -> Option<i64> {
+    option.strip_suffix(" min")?.parse::<i64>().ok().map(|m| m * 60)
+}
+
+/// The option shown for the monitor's timer state: "Forever" when off,
+/// else the option nearest its length (the app may set others).
+pub fn timer_option(on: bool, secs: i64) -> &'static str {
+    if !on {
+        return TIMER_FOREVER;
+    }
+    TIMER_OPTIONS
+        .iter()
+        .filter_map(|o| timer_secs(o).map(|s| (o, (s - secs).abs())))
+        .min_by_key(|&(_, d)| d)
+        .map(|(o, _)| *o)
+        .unwrap_or(TIMER_FOREVER)
 }
 
 pub fn by_id(id: u32) -> Option<&'static Dp> {
@@ -134,8 +162,14 @@ mod tests {
         assert_eq!(track_by_id(3542155), Some((3542154, "Brahms' Lullaby")));
         assert_eq!(track_by_id(12072916 + 14), Some((12072916, "Rain Shower")));
         assert_eq!(track_by_id(3219038 + 15), None);
-        assert_eq!(track_by_id(11279476), Some((11279469, "Heartbeat")));
+        assert_eq!(track_by_id(11279469), Some((11279468, "Brahms' Lullaby")));
+        assert_eq!(track_by_id(11279482), Some((11279468, "Rain Shower")));
         assert_eq!(current_track_id(&serde_json::json!(r#"{"bizcode":"phi-no-bm","id":3542155,"errcode":0}"#)), Some(3542155));
+        assert_eq!(timer_secs("90 min"), Some(5400));
+        assert_eq!(timer_secs("Forever"), None);
+        assert_eq!(timer_option(true, 600), "10 min");
+        assert_eq!(timer_option(true, 900), "10 min");
+        assert_eq!(timer_option(false, 600), "Forever");
         assert_eq!(track_value(3219038, 1), r#"{"bizcode":"phi-no-bm","id":3219039}"#);
     }
 }
