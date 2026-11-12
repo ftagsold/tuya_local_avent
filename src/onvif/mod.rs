@@ -57,7 +57,7 @@ async fn http_server(cfg: Config) -> Result<()> {
     // slow clients cannot pile up sockets and tasks.
     let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(32));
     loop {
-        let (sock, _) = match listener.accept().await {
+        let (sock, peer) = match listener.accept().await {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!("onvif accept: {e}");
@@ -72,7 +72,7 @@ async fn http_server(cfg: Config) -> Result<()> {
         let cfg = cfg.clone();
         tokio::spawn(async move {
             let _permit = permit;
-            match tokio::time::timeout(Duration::from_secs(20), handle_conn(sock, &cfg)).await {
+            match tokio::time::timeout(Duration::from_secs(20), handle_conn(sock, peer.ip(), &cfg)).await {
                 Ok(Err(e)) => tracing::debug!("onvif conn: {e:#}"),
                 Err(_) => tracing::debug!("onvif conn: timed out"),
                 Ok(Ok(())) => {}
@@ -85,7 +85,7 @@ async fn http_server(cfg: Config) -> Result<()> {
 /// the cap stops a client from growing the buffer with a huge Content-Length.
 const MAX_REQUEST: usize = 256 * 1024;
 
-async fn handle_conn(mut sock: TcpStream, cfg: &Config) -> Result<()> {
+async fn handle_conn(mut sock: TcpStream, peer: std::net::IpAddr, cfg: &Config) -> Result<()> {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 8192];
     // Read headers.
@@ -124,6 +124,7 @@ async fn handle_conn(mut sock: TcpStream, cfg: &Config) -> Result<()> {
 
     // Snapshot endpoint: access token from GetSnapshotUri, or HTTP Basic.
     if request_line.starts_with("GET") && request_line.contains("/snapshot") {
+        note_request(peer, "snapshot");
         if !snapshot_authorized(request_line, &head, cfg) {
             tracing::warn!("ONVIF snapshot: unauthorized request refused");
             let msg = "unauthorized";
@@ -141,6 +142,7 @@ async fn handle_conn(mut sock: TcpStream, cfg: &Config) -> Result<()> {
     // GetSystemDateAndTime and the capability discovery stay open, as Protect
     // probes those before it has credentials.
     let op = soap::operation(&body);
+    note_request(peer, &op);
     // Optional raw-request capture for debugging adoption (set AVENT_ONVIF_CAPTURE).
     if let Ok(path) = std::env::var("AVENT_ONVIF_CAPTURE") {
         use std::io::Write;
@@ -177,6 +179,19 @@ async fn handle_conn(mut sock: TcpStream, cfg: &Config) -> Result<()> {
     );
     sock.write_all(out.as_bytes()).await?;
     Ok(())
+}
+
+/// Log the first of each operation per client at info (what Protect asks
+/// for after a restart shows up), every one at debug.
+fn note_request(peer: std::net::IpAddr, op: &str) {
+    static SEEN: std::sync::Mutex<Vec<(std::net::IpAddr, String)>> = std::sync::Mutex::new(Vec::new());
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    if seen.len() < 256 && !seen.iter().any(|(p, o)| *p == peer && o == op) {
+        seen.push((peer, op.to_string()));
+        tracing::info!("ONVIF {peer}: {op}");
+    } else {
+        tracing::debug!("ONVIF {peer}: {op}");
+    }
 }
 
 /// Log each unsupported operation once, so what a client (Protect, Home

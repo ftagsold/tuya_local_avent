@@ -265,7 +265,15 @@ pub struct Health {
     last_ms: std::sync::atomic::AtomicU64,
     /// Last real frame only; `touch` at start does not set it.
     frame_ms: std::sync::atomic::AtomicU64,
+    /// First frame of the current unbroken run (0: none since `touch`).
+    up_ms: std::sync::atomic::AtomicU64,
+    /// Bumped by every `touch`, i.e. every relay (re)start: a new publisher
+    /// in go2rtc, so viewers of the old one get nothing more.
+    run: std::sync::atomic::AtomicU64,
 }
+
+/// A gap this long between frames starts a new run (`Health::up_for`).
+const RUN_GAP_MS: u64 = 2000;
 
 impl Health {
     fn now_ms() -> u64 {
@@ -273,14 +281,35 @@ impl Health {
     }
 
     pub fn touch(&self) {
-        self.last_ms.store(Self::now_ms(), std::sync::atomic::Ordering::Relaxed);
+        use std::sync::atomic::Ordering::Relaxed;
+        self.last_ms.store(Self::now_ms(), Relaxed);
+        self.up_ms.store(0, Relaxed);
+        self.run.fetch_add(1, Relaxed);
     }
 
     /// A new frame went through.
     pub fn frame(&self) {
+        use std::sync::atomic::Ordering::Relaxed;
         let now = Self::now_ms();
-        self.last_ms.store(now, std::sync::atomic::Ordering::Relaxed);
-        self.frame_ms.store(now, std::sync::atomic::Ordering::Relaxed);
+        let prev = self.frame_ms.swap(now, Relaxed);
+        self.last_ms.store(now, Relaxed);
+        if self.up_ms.load(Relaxed) == 0 || now.saturating_sub(prev) > RUN_GAP_MS {
+            self.up_ms.store(now, Relaxed);
+        }
+    }
+
+    /// How long frames have flowed without a break (zero when none flow).
+    pub fn up_for(&self) -> Duration {
+        let up = self.up_ms.load(std::sync::atomic::Ordering::Relaxed);
+        if up == 0 || self.frame_age() > Duration::from_millis(RUN_GAP_MS) {
+            return Duration::ZERO;
+        }
+        Duration::from_millis(Self::now_ms().saturating_sub(up))
+    }
+
+    /// The relay run: changes on every (re)start.
+    pub fn run(&self) -> u64 {
+        self.run.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Time since the last progress (or since `touch` at start).

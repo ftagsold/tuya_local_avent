@@ -51,10 +51,13 @@ touched; the bridge logs in only if the monitor rejects that password.
   SRTP, exec or ffmpeg sources. Anyone holding the RTSP credential could also
   push into the stream, so treat it like a camera admin password.
 - RTSP gate: `8554` is a TCP gate in front of go2rtc (internal `18554`). It
-  lets viewers through only while video frames flow, and closes them at once
-  otherwise. go2rtc would accept a viewer early and reject its backchannel;
-  UniFi Protect then freezes until reconnected by hand. The gate dials
-  go2rtc on the LAN address, so go2rtc's auth still applies.
+  lets viewers through once video frames have flowed for 3 s, answers them
+  `503 Service Unavailable` before that, and cuts every session through it
+  when video stops or the relay restarts. go2rtc would accept a viewer early
+  and reject its backchannel, and keep a viewer from before an outage on the
+  dead publisher; UniFi Protect then freezes until reconnected by hand. Cut,
+  it reconnects to the live stream. The gate dials go2rtc on the LAN
+  address, so go2rtc's auth still applies.
 - **Talkback.** The monitor's speaker is reached over the same LAN session
   as the video (`bridge/pkg/lan/talk.go`, reverse-engineered from the Tuya
   Smart app with `tools/frida/talk_capture.js`). go2rtc carries an RTSP
