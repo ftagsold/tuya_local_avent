@@ -55,9 +55,10 @@ FROM debian:bookworm-slim
 LABEL org.opencontainers.image.source="https://github.com/ftagsold/tuya_local_avent" \
       org.opencontainers.image.description="Local bridge: Philips Avent (Tuya) baby monitor to Home Assistant and UniFi Protect" \
       org.opencontainers.image.licenses="MIT"
-# ffmpeg (with drawtext/libfreetype), the overlay font, tzdata for the clock.
+# ffmpeg (with drawtext/libfreetype), the overlay font, tzdata for the clock,
+# iproute2 to pin the interface MAC (needs NET_ADMIN).
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ffmpeg ca-certificates fonts-dejavu-core tzdata \
+ && apt-get install -y --no-install-recommends ffmpeg ca-certificates fonts-dejavu-core tzdata iproute2 \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=gobridge /out/avent-webrtc-bridge /app/avent-webrtc-bridge
 COPY --from=rustbuild /out/tuya_local_avent /app/tuya_local_avent

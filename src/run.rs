@@ -53,6 +53,8 @@ pub struct Env {
     pub onvif_pass: String,
     pub onvif_port: u16,
     pub onvif_host_ip: String,
+    pub onvif_model: String,
+    pub onvif_mac: String,
     pub rtsp_user: String,
     pub rtsp_pass: String,
     pub overlay_font: String,
@@ -67,7 +69,7 @@ impl Env {
         let port = |k: &str, d: u16| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
         let onvif_user = or("ONVIF_USER", "avent");
         let onvif_pass = req("ONVIF_PASS")?;
-        let env = Self {
+        let mut env = Self {
             email: get("AVENT_EMAIL"),
             password: get("AVENT_PASSWORD"),
             region: or("AVENT_REGION", "eu"),
@@ -96,6 +98,8 @@ impl Env {
             onvif_pass,
             onvif_port: port("ONVIF_PORT", 8000),
             onvif_host_ip: get("ONVIF_BIND_IP"),
+            onvif_model: get("ONVIF_MODEL"),
+            onvif_mac: get("ONVIF_MAC"),
             overlay_font: or("AVENT_OVERLAY_FONT", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
             ffmpeg: or("AVENT_FFMPEG", "ffmpeg"),
         };
@@ -105,6 +109,11 @@ impl Env {
                 bail!("{k} is too weak: use at least 8 characters and not the placeholder");
             }
         }
+        env.onvif_mac = if env.onvif_mac.is_empty() {
+            crate::onvif::device_mac(&env.device_id)
+        } else {
+            crate::onvif::parse_mac(&env.onvif_mac).ok_or_else(|| anyhow::anyhow!("ONVIF_MAC must be a unicast MAC like 02:11:22:33:44:55"))?
+        };
         if env.p2p_password.is_empty() && !env.has_cloud() {
             bail!("set AVENT_P2P_PASSWORD, or AVENT_EMAIL/AVENT_PASSWORD/AVENT_APP_KEY/AVENT_SIGNING_KEY/AVENT_CH_KEY to fetch it");
         }
@@ -182,6 +191,10 @@ async fn cloud_fetch(env: &Env, cache: &mut Cache, cache_path: &std::path::Path)
 pub async fn run(env: Env) -> Result<()> {
     let cache_path = media::data_file(&env.data_dir, "cloud.json");
     let mut cache = Cache::load(&cache_path);
+
+    // 0. Pin the interface MAC first, before any peer caches the old one.
+    let host_ip = if env.onvif_host_ip.is_empty() { local_ip().unwrap_or_else(|| "127.0.0.1".into()) } else { env.onvif_host_ip.clone() };
+    crate::onvif::pin_mac(&host_ip, &env.onvif_mac).await;
 
     // 1. P2P password: env, else the last cloud fetch, else the cloud now.
     let (mut p2p, mut source) = if !env.p2p_password.is_empty() {
@@ -352,6 +365,7 @@ pub async fn run(env: Env) -> Result<()> {
             pass: env.mqtt_pass.clone(),
             device_id: env.device_id.clone(),
             device_name: device_name.clone(),
+            mac: env.onvif_mac.clone(),
         };
         let c = control.clone();
         tokio::spawn(async move {
@@ -367,7 +381,6 @@ pub async fn run(env: Env) -> Result<()> {
     }
 
     // 8. ONVIF for UniFi Protect / Home Assistant.
-    let host_ip = if env.onvif_host_ip.is_empty() { local_ip().unwrap_or_else(|| "127.0.0.1".into()) } else { env.onvif_host_ip.clone() };
     let ocfg = crate::onvif::Config {
         stream_uri: format!("rtsp://{}{host_ip}:{}/{path}", media::userinfo(&env.rtsp_user, &env.rtsp_pass), env.rtsp_port),
         stream_uri_plain: format!("rtsp://{host_ip}:{}/{path}", env.rtsp_port),
@@ -376,6 +389,10 @@ pub async fn run(env: Env) -> Result<()> {
         onvif_port: env.onvif_port,
         user: env.onvif_user.clone(),
         pass: env.onvif_pass.clone(),
+        // Protect names an adopted camera after the model: default to the
+        // stream name.
+        model: if env.onvif_model.is_empty() { path.clone() } else { env.onvif_model.clone() },
+        mac: env.onvif_mac.clone(),
         device_name: device_name.clone(),
         device_id: env.device_id.clone(),
     };

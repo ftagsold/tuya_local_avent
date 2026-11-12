@@ -23,6 +23,10 @@ services:
     #   docker network create -d macvlan \
     #     --subnet=192.168.1.0/24 --gateway=192.168.1.1 \
     #     -o parent=eth0 tuya-local-avent
+    # The bridge pins its interface MAC (stable, from the device id, or
+    # ONVIF_MAC): Protect keys cameras by MAC.
+    cap_add:
+      - NET_ADMIN
     networks:
       tuya-local-avent:
         ipv4_address: 192.168.1.90
@@ -53,6 +57,8 @@ services:
       ONVIF_PASS: CHANGEME_long_random
       ONVIF_PORT: "8000"
       ONVIF_BIND_IP: 192.168.1.90   # must equal this container's macvlan ipv4_address
+      # ONVIF_MODEL: Karla          # model Protect names the camera after; unset = stream name
+      # ONVIF_MAC: 02:11:22:33:44:55 # interface + ONVIF MAC; unset = derived from the device id
       # --- RTSP (go2rtc, always authenticated off loopback) ---
       RTSP_PORT: "8554"
       RTSP_USER: "avent"

@@ -134,6 +134,8 @@ Optional:
 | `AVENT_LAN_IP` | auto-discovered (set to skip discovery) |
 | `MQTT_HOST` / `MQTT_PORT` / `MQTT_USER` / `MQTT_PASS` | — / 1883 / — / — (unset `MQTT_HOST` disables HA control) |
 | `ONVIF_USER` / `ONVIF_PORT` / `ONVIF_BIND_IP` | `avent` / 8000 / auto |
+| `ONVIF_MODEL` | stream name (Protect names the adopted camera after the ONVIF model) |
+| `ONVIF_MAC` | derived from the device id (set on the interface and reported over ONVIF) |
 | `RTSP_USER` / `RTSP_PASS` | `ONVIF_USER` / `ONVIF_PASS` |
 | `RTSP_PORT` | `8554` (TCP) |
 | `TZ` | UTC (overlay clock timezone, e.g. `Europe/Berlin`) |
@@ -169,7 +171,11 @@ cp docker-compose.example.yml docker-compose.yml   # then fill in secrets
 docker compose up -d --build
 ```
 
-Set `ONVIF_BIND_IP` to the container's `ipv4_address`.
+Set `ONVIF_BIND_IP` to the container's `ipv4_address`. Protect keys a camera
+by MAC, and macvlan hands out a random one, so at start the bridge sets its
+interface MAC to a stable one (derived from the device id, or `ONVIF_MAC`).
+That needs `cap_add: [NET_ADMIN]` (in the example compose file). Without it
+the log warns and Protect offers the adopted camera again on every discovery.
 
 Logs: everything (the bridge, ffmpeg, go2rtc) goes to the container's
 stdout; the compose file caps it at 3 x 10 MB (`logging:` json-file). With

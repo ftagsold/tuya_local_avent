@@ -32,6 +32,10 @@ pub struct Config {
     pub user: String,
     pub pass: String,
     pub device_name: String,
+    /// GetDeviceInformation model; Protect names the adopted camera after it.
+    pub model: String,
+    /// MAC reported by GetNetworkInterfaces; pinned on the interface too.
+    pub mac: String,
     pub device_id: String,
 }
 
@@ -196,6 +200,62 @@ pub fn device_mac(device_id: &str) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(":")
 }
 
+/// Normalise a configured MAC to lowercase `aa:bb:cc:dd:ee:ff`. None unless
+/// six hex octets with the multicast bit clear.
+pub fn parse_mac(s: &str) -> Option<String> {
+    let b: Vec<u8> = s.trim().split([':', '-']).map(|o| if o.len() == 2 { u8::from_str_radix(o, 16).ok() } else { None }).collect::<Option<_>>()?;
+    if b.len() != 6 || b[0] & 1 != 0 {
+        return None;
+    }
+    Some(b.iter().map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(":"))
+}
+
+/// Set the MAC of the interface holding `ip` to `mac`. Protect keys a camera
+/// by MAC (ARP at discovery, GetNetworkInterfaces after adoption): a random
+/// macvlan MAC makes it offer the adopted camera again. Needs NET_ADMIN; on
+/// failure only warns, as the compose file may pin `mac_address` instead.
+#[cfg(target_os = "linux")]
+pub async fn pin_mac(ip: &str, mac: &str) {
+    use tokio::process::Command;
+    let out = |args: &[&str]| {
+        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        async move { Command::new("ip").args(&args).output().await }
+    };
+    let Ok(addrs) = out(&["-o", "-4", "addr", "show"]).await else {
+        tracing::warn!("ONVIF MAC: `ip` not found; cannot pin {mac}");
+        return;
+    };
+    let needle = format!("inet {ip}/");
+    let Some(ifname) = String::from_utf8_lossy(&addrs.stdout)
+        .lines()
+        .find(|l| l.contains(&needle))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .map(|n| n.split('@').next().unwrap_or(n).to_string())
+    else {
+        tracing::warn!("ONVIF MAC: no interface holds {ip}; cannot pin {mac}");
+        return;
+    };
+    if let Ok(link) = out(&["-o", "link", "show", "dev", &ifname]).await {
+        if String::from_utf8_lossy(&link.stdout).contains(&format!("link/ether {mac} ")) {
+            tracing::info!("ONVIF MAC {mac} on {ifname}");
+            return;
+        }
+    }
+    match out(&["link", "set", "dev", &ifname, "address", mac]).await {
+        Ok(o) if o.status.success() => tracing::info!("ONVIF MAC {mac} set on {ifname}"),
+        Ok(o) => tracing::warn!(
+            "ONVIF MAC: setting {mac} on {ifname} failed ({}); add cap_add NET_ADMIN or set mac_address in compose, else Protect re-offers the camera",
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
+        Err(e) => tracing::warn!("ONVIF MAC: ip link set: {e}"),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub async fn pin_mac(_ip: &str, mac: &str) {
+    tracing::debug!("ONVIF MAC {mac}: pinning only on Linux");
+}
+
 /// The snapshot access token: HMAC-SHA256(ONVIF password, device id), so it
 /// survives restarts and changes with the password.
 pub fn snapshot_token(cfg: &Config) -> String {
@@ -335,7 +395,7 @@ mod tests {
             host_ip: "192.168.1.90".into(), onvif_port: 8000,
             stream_uri: String::new(), stream_uri_plain: String::new(), snapshot_src: String::new(),
             user: "avent".into(), pass: "secret".into(),
-            device_name: "Nursery".into(), device_id: "dev1".into(),
+            device_name: "Nursery".into(), model: "Nursery".into(), mac: device_mac("dev1"), device_id: "dev1".into(),
         }
     }
 
@@ -349,5 +409,14 @@ mod tests {
         // base64("avent:secret")
         assert!(snapshot_authorized("GET /snapshot HTTP/1.1", "Authorization: Basic YXZlbnQ6c2VjcmV0\r\n", &c));
         assert!(!snapshot_authorized("GET /snapshot HTTP/1.1", "Authorization: Basic YXZlbnQ6bm9wZQ==\r\n", &c));
+    }
+
+    #[test]
+    fn parse_mac_normalises_and_rejects() {
+        assert_eq!(parse_mac("BE-0A-F0-F2-02-33").as_deref(), Some("be:0a:f0:f2:02:33"));
+        assert_eq!(parse_mac("01:00:5e:00:00:01"), None); // multicast
+        assert_eq!(parse_mac("be:0a:f0:f2:02"), None);
+        assert_eq!(parse_mac("be:0a:f0:f2:02:3"), None);
+        assert_eq!(parse_mac(&device_mac("dev1")), Some(device_mac("dev1")));
     }
 }

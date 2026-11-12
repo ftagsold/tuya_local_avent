@@ -24,6 +24,8 @@ pub struct Config {
     pub pass: String,
     pub device_id: String,
     pub device_name: String,
+    /// The ONVIF camera's MAC, so Home Assistant merges both devices.
+    pub mac: String,
 }
 
 /// base topic for this device's state/commands.
@@ -151,6 +153,7 @@ fn announce_cfg(cfg: &Config) -> Config {
         pass: String::new(),
         device_id: cfg.device_id.clone(),
         device_name: cfg.device_name.clone(),
+        mac: cfg.mac.clone(),
     }
 }
 
@@ -159,7 +162,7 @@ fn device_block(cfg: &Config) -> Value {
         "identifiers": [format!("avent_{}", cfg.device_id)],
         // Same MAC as the ONVIF camera: Home Assistant merges the ONVIF
         // integration's camera into this device.
-        "connections": [["mac", crate::onvif::device_mac(&cfg.device_id)]],
+        "connections": [["mac", cfg.mac]],
         "name": cfg.device_name,
         "manufacturer": "Philips Avent",
         "model": "SCD9xx (Tuya)",
@@ -350,7 +353,7 @@ mod tests {
 
     #[test]
     fn light_carries_the_brightness_dp() {
-        let cfg = Config { host: String::new(), port: 0, user: String::new(), pass: String::new(), device_id: "dev1".into(), device_name: "Nursery".into() };
+        let cfg = Config { host: String::new(), port: 0, user: String::new(), pass: String::new(), device_id: "dev1".into(), mac: crate::onvif::device_mac("dev1"), device_name: "Nursery".into() };
         let c = light_config(&cfg);
         assert_eq!(c["command_topic"], "avent/dev1/night_light/set");
         assert_eq!(c["brightness_command_topic"], "avent/dev1/brightness/set");

@@ -82,7 +82,7 @@ fn network_interfaces(cfg: &Config) -> String {
 <tt:Enabled>true</tt:Enabled><tt:Info><tt:Name>eth0</tt:Name><tt:HwAddress>{mac}</tt:HwAddress><tt:MTU>1500</tt:MTU></tt:Info>\
 <tt:IPv4><tt:Enabled>true</tt:Enabled><tt:Config><tt:Manual><tt:Address>{ip}</tt:Address><tt:PrefixLength>24</tt:PrefixLength></tt:Manual>\
 <tt:DHCP>false</tt:DHCP></tt:Config></tt:IPv4></tds:NetworkInterfaces></tds:GetNetworkInterfacesResponse>",
-        mac = super::device_mac(&cfg.device_id),
+        mac = xml(&cfg.mac),
         ip = xml(&cfg.host_ip),
     )
 }
@@ -207,12 +207,12 @@ fn device_info(cfg: &Config) -> String {
     format!(
         "<tds:GetDeviceInformationResponse>\
 <tds:Manufacturer>Philips Avent</tds:Manufacturer>\
-<tds:Model>SCD9xx</tds:Model>\
+<tds:Model>{}</tds:Model>\
 <tds:FirmwareVersion>1.0</tds:FirmwareVersion>\
 <tds:SerialNumber>{}</tds:SerialNumber>\
 <tds:HardwareId>avent-{}</tds:HardwareId>\
 </tds:GetDeviceInformationResponse>",
-        xml(&cfg.device_id), xml(&cfg.device_id)
+        xml(&cfg.model), xml(&cfg.device_id), xml(&cfg.device_id)
     )
 }
 
@@ -436,7 +436,7 @@ mod tests {
             stream_uri_plain: "rtsp://192.168.1.90:8554/Nursery".into(),
             snapshot_src: String::new(),
             user: "avent".into(), pass: "secret".into(),
-            device_name: "Nursery <3".into(), device_id: "dev1".into(),
+            device_name: "Nursery <3".into(), model: "Nursery <3".into(), mac: super::super::device_mac("dev1"), device_id: "dev1".into(),
         }
     }
 
@@ -557,5 +557,11 @@ mod tests {
     fn elem_text_not_fooled_by_wrapper() {
         assert_eq!(elem_text("<UsernameToken><Username>bob</Username>", "Username").as_deref(), Some("bob"));
         assert_eq!(elem_text("<wsu:Created xmlns:wsu=\"x\">T</wsu:Created>", "Created").as_deref(), Some("T"));
+    }
+
+    #[test]
+    fn device_info_reports_model_escaped() {
+        let r = dispatch("GetDeviceInformation", "", &cfg(), false).unwrap();
+        assert!(r.contains("<tds:Model>Nursery &lt;3</tds:Model>"));
     }
 }
