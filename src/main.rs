@@ -9,6 +9,7 @@ mod media;
 mod offer_test;
 mod onvif;
 mod probe;
+mod rtsp_gate;
 mod run;
 mod set_dp;
 mod tuya;

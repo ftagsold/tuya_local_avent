@@ -4,7 +4,8 @@
 //! on loopback only (random credentials); ffmpeg burns a live
 //! `yyyy-mm-dd hh:mm:ss | <device name>` overlay, re-encodes to H.264 + AAC and
 //! publishes into go2rtc, the one RTSP server reachable from the LAN, which
-//! requires `RTSP_USER`/`RTSP_PASS` off loopback. ONVIF points UniFi Protect
+//! requires `RTSP_USER`/`RTSP_PASS` off loopback. A gate (rtsp_gate.rs) on
+//! `RTSP_PORT` lets viewers through only while video flows. ONVIF points UniFi Protect
 //! and Home Assistant at that stream; its URI also carries the talkback
 //! backchannel (go2rtc → Go bridge → monitor speaker, all LAN).
 //!
@@ -27,6 +28,8 @@ use crate::tuya::mobile::{AppKeys, MobileClient};
 
 /// The Go bridge's loopback RTSP port.
 const BRIDGE_PORT: u16 = 38554;
+/// go2rtc's RTSP port behind the gate (rtsp_gate.rs); `RTSP_PORT` is the gate.
+const GO2RTC_PORT: u16 = 18554;
 
 pub struct Env {
     pub email: String,
@@ -234,9 +237,17 @@ pub async fn run(env: Env) -> Result<()> {
     let bridge_user = "bridge".to_string();
     let bridge_pass = media::random_secret();
     let bridge_url = format!("rtsp://{}127.0.0.1:{BRIDGE_PORT}/{path}", media::userinfo(&bridge_user, &bridge_pass));
+    // go2rtc sits behind the RTSP gate on an internal port. The gate dials
+    // it on the LAN address so go2rtc's auth still applies; without one,
+    // go2rtc serves RTSP_PORT itself, ungated.
+    let gate_ip = local_ip().and_then(|ip| ip.parse::<std::net::IpAddr>().ok()).filter(|ip| !ip.is_loopback());
+    let g2r_port = if gate_ip.is_some() { GO2RTC_PORT } else { env.rtsp_port };
+    if gate_ip.is_none() {
+        tracing::warn!("no LAN address found: go2rtc serves port {} directly, without the RTSP gate", env.rtsp_port);
+    }
     // go2rtc skips auth for loopback, so the relay publishes without one.
-    let publish_url = format!("rtsp://127.0.0.1:{}/{path}", env.rtsp_port);
-    let local_read_url = format!("rtsp://{}127.0.0.1:{}/{path}", media::userinfo(&env.rtsp_user, &env.rtsp_pass), env.rtsp_port);
+    let publish_url = format!("rtsp://127.0.0.1:{g2r_port}/{path}");
+    let local_read_url = format!("rtsp://{}127.0.0.1:{g2r_port}/{path}", media::userinfo(&env.rtsp_user, &env.rtsp_pass));
 
     // 4. Go bridge: loopback bind, internal credentials. Restarted (via the
     // watch) when the P2P password changes.
@@ -280,7 +291,7 @@ pub async fn run(env: Env) -> Result<()> {
     // 5. go2rtc: the only LAN-facing RTSP server.
     let g2r_cfg_path = media::data_file(&env.data_dir, "go2rtc.yaml");
     media::Go2rtc {
-        port: env.rtsp_port,
+        port: g2r_port,
         path: path.clone(),
         user: env.rtsp_user.clone(),
         pass: env.rtsp_pass.clone(),
@@ -312,6 +323,20 @@ pub async fn run(env: Env) -> Result<()> {
         );
     }
     let relay_health = std::sync::Arc::new(media::Health::default());
+    if let Some(ip) = gate_ip {
+        let health = relay_health.clone();
+        let listen = std::net::SocketAddr::from(([0, 0, 0, 0], env.rtsp_port));
+        let upstream = std::net::SocketAddr::new(ip, GO2RTC_PORT);
+        // Kept alive like ONVIF: a failed bind retries.
+        tokio::spawn(async move {
+            loop {
+                if let Err(e) = crate::rtsp_gate::run(listen, upstream, health.clone()).await {
+                    tracing::error!("RTSP gate ended: {e:#}; restarting in 5s");
+                }
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        });
+    }
     let relay_spec = Spec {
         name: "ffmpeg relay",
         program: env.ffmpeg.clone(),

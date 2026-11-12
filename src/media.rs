@@ -1,6 +1,6 @@
 //! Video pipeline: Go bridge (loopback, internal creds) → ffmpeg (clock +
 //! device-name overlay, H.264 + AAC) → go2rtc (the only RTSP server on the
-//! LAN, password required). Nothing outside the container can reach a stream
+//! LAN, password required, behind the gate in rtsp_gate.rs). Nothing outside the container can reach a stream
 //! without credentials: the Go bridge binds loopback with random credentials,
 //! and go2rtc requires the configured user for every connection that is not
 //! from loopback (the relay publishes, and snapshots read, over loopback).
@@ -263,6 +263,8 @@ fn forward<R: tokio::io::AsyncRead + Unpin + Send + 'static>(r: R) {
 #[derive(Default)]
 pub struct Health {
     last_ms: std::sync::atomic::AtomicU64,
+    /// Last real frame only; `touch` at start does not set it.
+    frame_ms: std::sync::atomic::AtomicU64,
 }
 
 impl Health {
@@ -274,9 +276,21 @@ impl Health {
         self.last_ms.store(Self::now_ms(), std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// A new frame went through.
+    pub fn frame(&self) {
+        let now = Self::now_ms();
+        self.last_ms.store(now, std::sync::atomic::Ordering::Relaxed);
+        self.frame_ms.store(now, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Time since the last progress (or since `touch` at start).
     pub fn age(&self) -> Duration {
         Duration::from_millis(Self::now_ms().saturating_sub(self.last_ms.load(std::sync::atomic::Ordering::Relaxed)))
+    }
+
+    /// Time since the last real frame (very long before the first).
+    pub fn frame_age(&self) -> Duration {
+        Duration::from_millis(Self::now_ms().saturating_sub(self.frame_ms.load(std::sync::atomic::Ordering::Relaxed)))
     }
 }
 
@@ -377,7 +391,7 @@ fn track_progress<R: tokio::io::AsyncRead + Unpin + Send + 'static>(r: R, health
             if let Some(f) = l.strip_prefix("frame=") {
                 if f != last && f != "0" {
                     last = f.to_string();
-                    health.touch();
+                    health.frame();
                 }
             }
         }
