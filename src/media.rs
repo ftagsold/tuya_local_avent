@@ -69,7 +69,7 @@ pub struct Go2rtc {
 impl Go2rtc {
     /// go2rtc config: RTSP (password required off loopback) and the API on
     /// loopback only; WebRTC, RTMP, SRTP and every exec-capable source off.
-    /// Viewers get the relay's H.264 + AAC (`default_query`); the Go bridge
+    /// Viewers get the relay's H.264 + AAC + Opus (`default_query`); the Go bridge
     /// source contributes audio only, so its raw video never reaches them,
     /// and carries the backchannel. Strings are JSON-quoted, which YAML reads
     /// verbatim.
@@ -86,7 +86,7 @@ rtsp:
   listen: \":{port}\"
   username: {user}
   password: {pass}
-  default_query: \"video=h264&audio=aac\"
+  default_query: \"video=h264&audio=aac&audio=opus\"
 webrtc:
   listen: \"\"
 rtmp:
@@ -141,9 +141,12 @@ pub fn overlay_text(device_name: &str) -> String {
 }
 
 /// ffmpeg arguments for the relay: pull the bridge, burn the overlay (when
-/// `drawtext` is available), H.264 + AAC (UniFi Protect plays no G.711),
-/// publish to go2rtc.
+/// `drawtext` is available), H.264 + AAC (UniFi Protect plays no G.711) +
+/// Opus, publish to go2rtc.
 ///
+/// - Opus is for WebRTC viewers (Home Assistant's go2rtc): browsers play no
+///   AAC, and HA's own AAC->Opus transcode fails for ONVIF cameras (its
+///   internal RTSP lookup 404s on the `mac#profile` stream name).
 /// - AAC at 48 kHz: at 24 kHz and below decoders (VLC, Protect) may assume
 ///   implicit HE-AAC SBR and double the rate, which breaks A/V timing.
 /// - H.264 as the camera sends it: one slice per frame (no `zerolatency`
@@ -155,7 +158,7 @@ pub fn relay_args(input: &str, output: &str, overlay: Option<(&str, &Path)>) -> 
     let mut a: Vec<String> = [
         "-hide_banner", "-loglevel", "warning", "-nostdin", "-nostats", "-progress", "pipe:1",
         "-rtsp_transport", "tcp", "-timeout", "10000000", "-i", input,
-        "-map", "0:v:0", "-map", "0:a:0?",
+        "-map", "0:v:0", "-map", "0:a:0?", "-map", "0:a:0?",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -177,7 +180,9 @@ pub fn relay_args(input: &str, output: &str, overlay: Option<(&str, &Path)>) -> 
             "-bf", "0", "-g", "50", "-keyint_min", "50", "-sc_threshold", "0",
             "-x264-params", "sliced-threads=0:slices=1:repeat-headers=1:rc-lookahead=0:sync-lookahead=0",
             "-maxrate", "2500k", "-bufsize", "5000k",
-            "-c:a", "aac", "-profile:a", "aac_low", "-b:a", "64k", "-ar", "48000", "-ac", "1",
+            "-c:a:0", "aac", "-profile:a:0", "aac_low", "-b:a:0", "64k",
+            "-c:a:1", "libopus", "-b:a:1", "32k", "-application:a:1", "lowdelay",
+            "-ar", "48000", "-ac", "1",
             "-af", "aresample=async=1",
             "-f", "rtsp", "-rtsp_transport", "tcp", output,
         ]
@@ -395,6 +400,7 @@ mod tests {
         let c = g.config();
         assert!(c.contains("password: \"a\\\"b\""));
         assert!(c.contains("modules: [api, rtsp]"));
+        assert!(c.contains("default_query: \"video=h264&audio=aac&audio=opus\""));
         assert!(c.contains("listen: \"127.0.0.1:1984\""));
         assert!(c.contains("rtsp://bridge:x@127.0.0.1:38554/Nursery#media=audio#backchannel=1"));
         for off in ["webrtc", "rtmp", "srtp"] {

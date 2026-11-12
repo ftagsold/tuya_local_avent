@@ -18,9 +18,12 @@
  *   the camera's device unless set explicitly.
  * - Full screen: the video with its overlays and controls (Fullscreen API,
  *   or a fixed full-window layer where the browser has none, e.g. iPhone).
+ *   On a phone held upright it shows landscape: orientation lock where the
+ *   browser allows it, else the picture is turned by CSS.
  * - Defaults: listen on/off, listen volume and talk volume when the card
  *   loads. Browsers allow unmuted autoplay only after a user gesture: if
- *   refused, the card starts muted and turns listen on at the first tap.
+ *   refused, the card starts muted, shows "Tap for sound" and turns listen
+ *   on at the first tap anywhere on the page.
  * - Overlays: other entities' states as plain HTML text over the video.
  *
  * No build step, no dependencies: copy to /config/www and add
@@ -28,7 +31,7 @@
  */
 
 const CARD = "tuya-local-avent-card";
-const VERSION = "1.2.0";
+const VERSION = "1.2.1";
 
 const ALL_CONTROLS = ["listen", "night_light", "lullaby", "talk", "fullscreen"];
 // Controls that open a panel (toggle + slider); the rest act on tap.
@@ -81,6 +84,16 @@ const STYLE = `
   .video { position: relative; background: #000; aspect-ratio: 16 / 9; }
   .video:fullscreen { aspect-ratio: auto; width: 100%; height: 100%; }
   .video.pseudo-fs { position: fixed; inset: 0; z-index: 9999; aspect-ratio: auto; }
+  /* Everything over the video lives in the stage, so it can be turned to
+     landscape on a portrait phone (the fullscreen element itself cannot be
+     transformed). */
+  .stage { position: absolute; inset: 0; }
+  .video.rotated .stage { inset: auto; top: 50%; left: 50%; width: 100vh; height: 100vw;
+    width: 100dvh; height: 100dvw; transform: translate(-50%, -50%) rotate(90deg); }
+  .hint { position: absolute; z-index: 2; top: 8px; left: 50%; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 6px; padding: 4px 12px 4px 8px; border-radius: 999px;
+    background: rgba(20, 20, 20, .55); color: #fff; font-size: 13px; pointer-events: none; white-space: nowrap; }
+  .hint[hidden] { display: none; }
   .video video, .video img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
   .overlay { position: absolute; z-index: 2; pointer-events: none; color: #fff; font-size: 14px;
     line-height: 1.3; text-shadow: 0 0 3px #000, 0 0 6px #000; white-space: nowrap; }
@@ -129,9 +142,15 @@ class TuyaLocalAventCard extends HTMLElement {
       if (this._pseudoFs) this._setPseudoFs(false);
       this._setOpen(null);
     };
-    this._onFullscreen = () => this._update();
+    this._onFullscreen = () => {
+      if (!this._isFullscreen()) this._unlockOrientation();
+      this._fitRotation();
+      this._update();
+    };
+    this._onResize = () => this._fitRotation();
     this._unlockListen = () => {
       document.removeEventListener("pointerdown", this._unlockListen, true);
+      if (this._els) this._els.hint.hidden = true;
       if (this._listen) this._applyListen();
       this._update();
     };
@@ -194,6 +213,7 @@ class TuyaLocalAventCard extends HTMLElement {
     document.addEventListener("fullscreenchange", this._onFullscreen);
     document.addEventListener("webkitfullscreenchange", this._onFullscreen);
     document.addEventListener("visibilitychange", this._onVisible);
+    window.addEventListener("resize", this._onResize);
     if (this._mjpeg) this._reloadMjpeg();
     else if (this._hass && this._config && !this._pc) this._startVideo();
   }
@@ -205,6 +225,7 @@ class TuyaLocalAventCard extends HTMLElement {
     document.removeEventListener("webkitfullscreenchange", this._onFullscreen);
     document.removeEventListener("visibilitychange", this._onVisible);
     document.removeEventListener("pointerdown", this._unlockListen, true);
+    window.removeEventListener("resize", this._onResize);
     clearTimeout(this._hideTimer);
     this._stopTalk();
     this._stopVideo();
@@ -368,17 +389,18 @@ class TuyaLocalAventCard extends HTMLElement {
       .join("");
     this.shadowRoot.innerHTML = `<style>${STYLE}</style><ha-card>
       ${c.title ? `<h1 class="card-header">${esc(c.title)}</h1>` : ""}
-      <div class="video" id="video">
+      <div class="video" id="video"><div class="stage">
         <video id="v" autoplay playsinline muted></video>
         <div class="status" id="status">Connecting…</div>
+        <div class="hint" id="hint" hidden><ha-icon icon="mdi:volume-off"></ha-icon>Tap for sound</div>
         <div id="overlays"></div>
         <div class="group" id="group" ${c.controls.length ? "" : "hidden"}>
           <div class="main" id="main" style="display:flex;gap:6px">${buttons}</div>
           ${panels}
         </div>
-      </div></ha-card>`;
+      </div></div></ha-card>`;
     const $ = (id) => this.shadowRoot.getElementById(id);
-    this._els = { wrap: $("video"), video: $("v"), status: $("status"), overlays: $("overlays"), group: $("group"), main: $("main") };
+    this._els = { wrap: $("video"), video: $("v"), status: $("status"), hint: $("hint"), overlays: $("overlays"), group: $("group"), main: $("main") };
     this._overlayHtml = null;
     this._pseudoFs = false;
     if (this._mjpeg) this._showMjpeg();
@@ -479,12 +501,16 @@ class TuyaLocalAventCard extends HTMLElement {
     if (this._isFullscreen()) {
       if (this._pseudoFs) this._setPseudoFs(false);
       else (document.exitFullscreen || document.webkitExitFullscreen)?.call(document);
+      this._unlockOrientation();
       return;
     }
     const req = wrap.requestFullscreen || wrap.webkitRequestFullscreen;
     try {
       if (!req) throw new Error("no Fullscreen API");
       await req.call(wrap, { navigationUI: "hide" });
+      // Phones: landscape. Allowed only in fullscreen, and not everywhere
+      // (iOS, some WebViews): _fitRotation turns the stage instead.
+      if (this._phone()) screen.orientation?.lock?.("landscape").catch(() => {});
     } catch (e) {
       console.info(CARD, "fullscreen fallback:", e.message || e);
       this._setPseudoFs(true);
@@ -495,7 +521,27 @@ class TuyaLocalAventCard extends HTMLElement {
   _setPseudoFs(on) {
     this._pseudoFs = on;
     this._els.wrap.classList.toggle("pseudo-fs", on);
+    this._fitRotation();
     this._update();
+  }
+
+  _phone() {
+    return window.matchMedia?.("(pointer: coarse)").matches ?? false;
+  }
+
+  // Full screen on a phone held upright: show the video turned to landscape.
+  // Re-checked on resize, so turning the phone (or an orientation lock that
+  // took effect) drops the rotation.
+  _fitRotation() {
+    if (!this._els) return;
+    const on = this._isFullscreen() && this._phone() && window.innerHeight > window.innerWidth;
+    this._els.wrap.classList.toggle("rotated", on);
+  }
+
+  _unlockOrientation() {
+    try {
+      screen.orientation?.unlock?.();
+    } catch (_) {}
   }
 
   // ---- listen ----
@@ -506,6 +552,7 @@ class TuyaLocalAventCard extends HTMLElement {
   _applyListen() {
     const v = this._els?.video;
     if (!v || this._mjpeg) return;
+    this._els.hint.hidden = true;
     v.volume = this._listenVol;
     v.muted = !this._listen;
     this._update();
@@ -513,6 +560,7 @@ class TuyaLocalAventCard extends HTMLElement {
       if (e.name !== "NotAllowedError" || v.muted) return;
       v.muted = true;
       v.play().catch(() => {});
+      this._els.hint.hidden = false;
       document.addEventListener("pointerdown", this._unlockListen, true);
       this._update();
     });

@@ -191,7 +191,10 @@ Set `ONVIF_BIND_IP` to the container's `ipv4_address`.
 `card/tuya-local-avent-card.js` is a dependency-free Lovelace card:
 
 - **Video + listen audio** from the ONVIF camera entity over Home
-  Assistant's own WebRTC (built-in go2rtc). No transcoding in the card. If
+  Assistant's own WebRTC (built-in go2rtc). No transcoding in the card. The
+  bridge's stream carries Opus next to AAC for this: HA's go2rtc cannot
+  transcode audio for ONVIF cameras (its internal lookup 404s on the
+  `mac#profile` stream name). If
   HA offers no WebRTC for the camera (go2rtc integration missing), the card
   falls back to HA's MJPEG proxy and says so: low quality, no listen/talk.
   A WebRTC stream that stops decoding for 15 s is reconnected.
@@ -210,10 +213,13 @@ Set `ONVIF_BIND_IP` to the container's `ipv4_address`.
   device; set them explicitly if HA did not merge the devices.
 - **Full screen**: the video with overlays and controls. Uses the
   Fullscreen API, or a full-window layer where the browser has none
-  (iPhone).
+  (iPhone). On a phone held upright it goes landscape (orientation lock, or
+  the picture turned by CSS where the browser refuses the lock).
 - **Defaults**: listen on/off, listen volume and talk volume when the card
   loads. Browsers allow sound only after a user gesture: if refused, the
-  card starts muted and turns listen on at the first tap.
+  card starts muted, shows "Tap for sound" and turns listen on at the first
+  tap. To start with sound right away, allow autoplay for the HA site in the
+  browser (Firefox, Safari: site settings) or in the Companion app.
 - **Overlays**: other entities' states as transparent HTML text over the
   video, at a named position or at explicit `top/left/right/bottom`.
 
