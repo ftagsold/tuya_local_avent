@@ -239,14 +239,15 @@ Set `ONVIF_BIND_IP` to the container's `ipv4_address`.
   browser (Firefox, Safari: site settings) or in the Companion app.
 - **Background listening**: listen audio has its own `<audio>` element,
   separate from the video, and registers a Media Session (lock-screen
-  controls). It keeps playing with the screen off only where the browser or
-  app keeps running pages in the background: Chrome on Android does; the
-  Companion apps and iOS Safari pause the page when it is hidden. Home
+  controls). In a browser that keeps hidden pages playing (Chrome, Firefox
+  on Android), it plays on with the screen locked if the card was in full
+  screen, and is muted while hidden otherwise. The Companion apps and iOS
+  Safari pause the page when it is hidden. Home
   Assistant also closes its connection, and with it the stream, 5 minutes
   after the page is hidden: turn off *Profile → Browser settings →
   Automatically close connection* on that phone.
-- **Listen in background** (control `background`, Android, full screen
-  only): opens the camera's sound alone in a media app through Android's
+- **Listen in background** (control `background`, Android Companion app,
+  full screen only; a browser needs no hand-off): opens the camera's sound alone in a media app through Android's
   *open with* (VLC, ...). Plain audio, so the app keeps playing with the
   screen locked and shows lock-screen controls; the card's own listen turns
   off. The audio comes from the `tuya_local_avent` Home Assistant

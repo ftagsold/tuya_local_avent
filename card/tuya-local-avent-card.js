@@ -30,11 +30,12 @@
  *   loads. Browsers allow unmuted autoplay only after a user gesture: if
  *   refused, the card starts muted, shows "Tap for sound" and turns listen
  *   on at the first tap anywhere on the page.
- * - Background: listen audio plays from its own <audio> element, so it keeps
- *   playing while the page is hidden or the phone is locked, where the
- *   browser or app allows it (lock-screen media controls via Media Session).
- *   The Android Companion app pauses the page when it stops, so in full
- *   screen on Android a button hands the camera's sound to a media app
+ * - Background: listen audio plays from its own <audio> element, so in a
+ *   browser it keeps playing with the phone locked (lock-screen controls via
+ *   Media Session), but only if the card was in full screen; otherwise it is
+ *   muted while the page is hidden. The Android Companion app pauses the
+ *   page when it stops, so there, in full screen, a button hands the
+ *   camera's sound to a media app
  *   such as VLC, which plays audio on with the screen locked. The stream is
  *   the tuya_local_avent integration's audio-only view, through Home
  *   Assistant's own URL (works remotely), as a path signed for this user
@@ -48,7 +49,7 @@
  */
 
 const CARD = "tuya-local-avent-card";
-const VERSION = "1.5.0";
+const VERSION = "1.5.1";
 
 const ALL_CONTROLS = ["listen", "night_light", "lullaby", "talk", "fullscreen", "background"];
 // Controls that open a panel (toggle + slider); the rest act on tap.
@@ -61,7 +62,7 @@ const CONTROL_LABELS = {
   lullaby: "Lullaby (play/stop + track + timer + volume)",
   talk: "Talk (on/off + talk volume)",
   fullscreen: "Full screen",
-  background: "Listen in background (full screen, Android: opens a media app)",
+  background: "Listen in background (full screen, Android Companion app: opens a media app)",
 };
 const LIGHT_LEVELS = [33, 66, 100];
 const ICONS = {
@@ -193,6 +194,8 @@ class TuyaLocalAventCard extends HTMLElement {
       this._setOpen(null);
     };
     this._onFullscreen = () => {
+      // Locking the phone may leave full screen just before the page hides.
+      if (!this._isFullscreen()) this._fsLeftAt = Date.now();
       if (!this._isFullscreen()) this._unlockOrientation();
       this._fitRotation();
       this._update();
@@ -205,7 +208,20 @@ class TuyaLocalAventCard extends HTMLElement {
       this._update();
     };
     this._onVisible = () => {
-      if (document.hidden) return;
+      const a = this._els?.audio;
+      if (document.hidden) {
+        // Hidden: sound goes on only from full screen.
+        const wasFs = this._isFullscreen() || Date.now() - (this._fsLeftAt ?? 0) < 1500;
+        if (a && this._listen && !a.muted && !wasFs) {
+          a.muted = true;
+          this._hiddenMuted = true;
+        }
+        return;
+      }
+      if (this._hiddenMuted) {
+        this._hiddenMuted = false;
+        if (a && this._listen) a.muted = false;
+      }
       if (this._mjpeg) return this._reloadMjpeg();
       // A browser may pause media while hidden; resume it.
       if (this._stream) {
@@ -690,8 +706,11 @@ class TuyaLocalAventCard extends HTMLElement {
     } catch (_) {}
   }
 
-  _android() {
-    return /Android/i.test(navigator.userAgent);
+  // The Android Companion app (its WebView adds "Home Assistant/<version>").
+  // A browser keeps the page's own sound playing; only the app needs a
+  // media app to hand it to.
+  _companion() {
+    return /Android/i.test(navigator.userAgent) && /Home Assistant\//.test(navigator.userAgent);
   }
 
   // Hand the listen audio to a media app (Android "open with"): it plays on
@@ -783,7 +802,7 @@ class TuyaLocalAventCard extends HTMLElement {
     const fs = root.querySelector("[data-fs] ha-icon");
     if (fs) fs.setAttribute("icon", ICONS.fullscreen[this._isFullscreen() ? 0 : 1]);
     const bg = root.querySelector("[data-bg]");
-    if (bg) bg.hidden = !(this._isFullscreen() && this._android());
+    if (bg) bg.hidden = !(this._isFullscreen() && this._companion());
     for (const key of this._config.controls) {
       if (!PANEL_CONTROLS.includes(key)) continue;
       const m = this._model(key);
