@@ -34,13 +34,10 @@
  *   browser it keeps playing with the phone locked (lock-screen controls via
  *   Media Session), but only if the card was in full screen; otherwise it is
  *   muted while the page is hidden. The Android Companion app pauses the
- *   page when it stops, so there, in full screen, a button hands the
- *   camera's sound to a media app
- *   such as VLC, which plays audio on with the screen locked. The stream is
- *   the tuya_local_avent integration's audio-only view, through Home
- *   Assistant's own URL (works remotely), as a path signed for this user
- *   (`auth/sign_path`, LISTEN_SIGN_S). Without the integration: Home
- *   Assistant's HLS stream (video too, which players may pause on lock).
+ *   page when it stops, so there, in full screen, a button opens Home
+ *   Assistant's own HLS stream of the camera (token URL, no login) in VLC,
+ *   named after the stream. VLC keeps playing it as audio with the screen
+ *   locked once its Background/PiP mode is "Play videos in background".
  * - Overlays: other entities' states as plain HTML text over the video:
  *   the editor's three corner pickers, plus the `overlays` YAML list.
  *
@@ -49,7 +46,7 @@
  */
 
 const CARD = "tuya-local-avent-card";
-const VERSION = "1.5.1";
+const VERSION = "1.6.0";
 
 const ALL_CONTROLS = ["listen", "night_light", "lullaby", "talk", "fullscreen", "background"];
 // Controls that open a panel (toggle + slider); the rest act on tap.
@@ -62,7 +59,7 @@ const CONTROL_LABELS = {
   lullaby: "Lullaby (play/stop + track + timer + volume)",
   talk: "Talk (on/off + talk volume)",
   fullscreen: "Full screen",
-  background: "Listen in background (full screen, Android Companion app: opens a media app)",
+  background: "Listen in background (full screen, Android Companion app: opens VLC)",
 };
 const LIGHT_LEVELS = [33, 66, 100];
 const ICONS = {
@@ -80,9 +77,6 @@ const TRACKS = [
   "Mother's Shh", "Calming River", "Heartbeat", "Vacuum Cleaner", "White Noise",
   "Garden Bird Song", "Valley Wind", "Ocean Shore", "Night-time Nature", "Rain Shower",
 ];
-// How long a signed listen link (handed to a media app) stays valid: one
-// night. The app reconnects with it after a network drop.
-const LISTEN_SIGN_S = 12 * 3600;
 // The bridge's lullaby timer options.
 const TIMERS = ["5 min", "10 min", "20 min", "30 min", "60 min", "90 min", "Forever"];
 // Editor corner pickers: config key -> overlay position.
@@ -713,36 +707,36 @@ class TuyaLocalAventCard extends HTMLElement {
     return /Android/i.test(navigator.userAgent) && /Home Assistant\//.test(navigator.userAgent);
   }
 
-  // Hand the listen audio to a media app (Android "open with"): it plays on
-  // with the screen locked and shows lock-screen controls. Preferred: the
-  // tuya_local_avent integration's audio-only view, signed for this user.
-  // Fallback: HA's HLS stream (stream token, video too). The card's own
-  // listen goes off, else both play once the app is back.
+  // Hand the camera to VLC: it plays on with the screen locked and shows
+  // lock-screen controls. The URL is HA's HLS stream (its own stream token,
+  // so VLC needs no login; works wherever HA does). A video type opens
+  // VLC's player, the only VLC path that takes the `title` extra (its
+  // background service names a stream after the URL's file name,
+  // "master_playlist"). Without VLC the Companion app opens its store page.
+  // The card's own listen goes off, else both play once the app is back.
   async _listenInBackground() {
     try {
-      let url;
-      let type = "audio/aac";
-      if (this._hass.config?.components?.includes("tuya_local_avent")) {
-        const path = `/api/tuya_local_avent/listen/${encodeURIComponent(this._config.camera)}`;
-        url = (await this._hass.callWS({ type: "auth/sign_path", path, expires: LISTEN_SIGN_S })).path;
-      } else {
-        console.info(CARD, "tuya_local_avent integration not loaded: background listen uses HLS (video too)");
-        url = (await this._hass.callWS({ type: "camera/stream", entity_id: this._config.camera, format: "hls" })).url;
-        type = "application/vnd.apple.mpegurl";
-      }
+      const { url } = await this._hass.callWS({ type: "camera/stream", entity_id: this._config.camera, format: "hls" });
       const u = new URL(url, location.href);
-      const title = this._config.title || this._state(this._config.camera)?.attributes.friendly_name || "Baby monitor";
       this._listen = false;
       this._applyListen();
-      // Navigations to intent: URIs are launched by the Companion app (and Chrome).
+      // Navigations to intent: URIs are launched by the Companion app.
       location.href =
         `intent://${u.host}${u.pathname}${u.search}#Intent;scheme=${u.protocol.replace(":", "")};` +
-        `action=android.intent.action.VIEW;type=${type};S.title=${encodeURIComponent(title)};end`;
+        `package=org.videolan.vlc;action=android.intent.action.VIEW;type=video/*;` +
+        `S.title=${encodeURIComponent(this._streamName())};end`;
     } catch (e) {
       console.warn(CARD, "background listen", e);
       this._setStatus(`No HLS stream from Home Assistant: ${e.message || e.code || e}`);
       setTimeout(() => this._pc?.connectionState === "connected" && this._setStatus(""), 5000);
     }
+  }
+
+  // The stream's name: the camera's device (the monitor's name, as the
+  // bridge's stream path), else the card title, else the camera's name.
+  _streamName() {
+    const dev = this._hass.devices?.[this._hass.entities?.[this._config.camera]?.device_id];
+    return dev?.name_by_user || dev?.name || this._config.title || this._state(this._config.camera)?.attributes.friendly_name || "Baby monitor";
   }
 
   // ---- listen ----

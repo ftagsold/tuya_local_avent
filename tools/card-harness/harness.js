@@ -243,8 +243,6 @@ async function callWS(msg) {
       return { frontend_stream_types: $("nowebrtc").checked ? ["hls"] : ["hls", "web_rtc"] };
     case "camera/webrtc/get_client_config":
       return { configuration: { iceServers: [] } };
-    case "auth/sign_path":
-      return { path: `${msg.path}?authSig=harness` };
     case "camera/stream":
       // HA's HLS endpoint shape (token URL); go2rtc's HLS stands in for it.
       return { url: `/api/hls/harness-token/master_playlist.m3u8` };
@@ -302,7 +300,6 @@ function makeHass() {
     states: { ...states },
     entities,
     devices: { [DEVICE]: { id: DEVICE, name: "Nursery" } },
-    config: { components: ["camera", "tuya_local_avent"] },
     callService,
     callWS,
     connection: { subscribeMessage },

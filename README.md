@@ -247,52 +247,14 @@ Set `ONVIF_BIND_IP` to the container's `ipv4_address`.
   after the page is hidden: turn off *Profile → Browser settings →
   Automatically close connection* on that phone.
 - **Listen in background** (control `background`, Android Companion app,
-  full screen only; a browser needs no hand-off): opens the camera's sound alone in a media app through Android's
-  *open with* (VLC, ...). Plain audio, so the app keeps playing with the
-  screen locked and shows lock-screen controls; the card's own listen turns
-  off. The audio comes from the `tuya_local_avent` Home Assistant
-  integration (below) through Home Assistant's own URL, so it works
-  wherever Home Assistant does (remote access included, over HTTPS).
-  Without the integration the card falls back to Home Assistant's HLS
-  stream (video too; players may pause it on lock).
-
-### Home Assistant integration (background listen)
-
-`custom_components/tuya_local_avent` adds one view,
-`/api/tuya_local_avent/listen/<camera entity>`: the camera's first audio
-track as ADTS AAC (64 kbit/s mono, one ffmpeg per listener, at most 4,
-ended when the player hangs up). Security:
-
-- the view requires Home Assistant authentication and read access to that
-  camera entity;
-- the card hands the media app a path signed with `auth/sign_path`: valid
-  12 h, only for that exact path, and bound to the signing user's refresh
-  token (log out or revoke the token and the link dies);
-- nothing new listens on the network: it is Home Assistant's own HTTPS URL.
-
-A signed link is a key to listen while it is valid: it lives only in the
-media app. Install (NixOS):
-
-```nix
-services.home-assistant.customComponents = [
-  (pkgs.buildHomeAssistantComponent {
-    owner = "ftagsold";
-    domain = "tuya_local_avent";
-    version = "1.0.0";
-    src = pkgs.fetchFromGitHub {
-      owner = "ftagsold";
-      repo = "tuya_local_avent";
-      rev = "<commit>";
-      hash = "<nix hash>";
-    };
-  })
-];
-services.home-assistant.config.tuya_local_avent = {};
-```
-
-Elsewhere: copy `custom_components/tuya_local_avent` into
-`/config/custom_components/`, add `tuya_local_avent:` to
-`configuration.yaml`, restart.
+  full screen only; a browser needs no hand-off): opens Home Assistant's
+  own HLS stream of the camera in VLC, named after the stream (the camera's
+  device). The URL carries HA's stream token, so VLC needs no login, and it
+  works wherever HA does (remote access included). The card's own listen
+  turns off. Without VLC, the Companion app opens its store page. One-time
+  VLC setting: *Settings → Video → Background/PiP mode → Play videos in
+  background*; then locking the phone keeps the sound playing, with lock-screen
+  controls. HLS lags a few seconds.
 - **Overlays**: other entities' states as transparent HTML text over the
   video. The editor has a picker (with search) per corner: top right,
   bottom left, bottom right (`overlay_top_right` etc.). The `overlays`
