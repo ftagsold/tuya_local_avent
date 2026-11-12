@@ -77,6 +77,10 @@ async fn http_server(cfg: Config) -> Result<()> {
     }
 }
 
+/// Largest request accepted (headers + body). ONVIF requests are a few KiB;
+/// the cap stops a client from growing the buffer with a huge Content-Length.
+const MAX_REQUEST: usize = 256 * 1024;
+
 async fn handle_conn(mut sock: TcpStream, cfg: &Config) -> Result<()> {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 8192];
@@ -95,10 +99,14 @@ async fn handle_conn(mut sock: TcpStream, cfg: &Config) -> Result<()> {
                 .unwrap_or(0);
             break (pos + 4, len);
         }
-        if buf.len() > 1 << 20 {
+        if buf.len() > MAX_REQUEST {
             return Ok(());
         }
     };
+    if headers_end + content_len > MAX_REQUEST {
+        sock.write_all(b"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await?;
+        return Ok(());
+    }
     while buf.len() < headers_end + content_len {
         let n = sock.read(&mut tmp).await?;
         if n == 0 {
@@ -201,7 +209,7 @@ pub fn snapshot_token(cfg: &Config) -> String {
 fn snapshot_authorized(request_line: &str, head: &str, cfg: &Config) -> bool {
     let target = request_line.split_whitespace().nth(1).unwrap_or("");
     let token = snapshot_token(cfg);
-    if target.split(['?', '&']).any(|kv| kv.strip_prefix("t=") == Some(token.as_str())) {
+    if target.split(['?', '&']).any(|kv| kv.strip_prefix("t=").is_some_and(|t| soap::ct_eq(t, &token))) {
         return true;
     }
     use base64::Engine;
@@ -211,7 +219,7 @@ fn snapshot_authorized(request_line: &str, head: &str, cfg: &Config) -> bool {
         let mut parts = v.trim().splitn(2, ' ');
         k.trim().eq_ignore_ascii_case("authorization")
             && parts.next().is_some_and(|s| s.eq_ignore_ascii_case("basic"))
-            && parts.next().map(str::trim) == Some(want.as_str())
+            && parts.next().is_some_and(|v| soap::ct_eq(v.trim(), &want))
     })
 }
 
@@ -298,8 +306,14 @@ async fn ws_discovery(cfg: Config) -> Result<()> {
                 continue;
             }
         };
+        // Discovery is a LAN protocol: never answer (or reflect spoofed
+        // probes to) addresses outside private, link-local or loopback.
+        let local = match from.ip() {
+            std::net::IpAddr::V4(ip) => ip.is_private() || ip.is_link_local() || ip.is_loopback(),
+            std::net::IpAddr::V6(_) => false,
+        };
         let msg = String::from_utf8_lossy(&buf[..n]);
-        if !msg.contains("Probe") {
+        if !local || !msg.contains("Probe") {
             continue;
         }
         let relates = soap::extract_message_id(&msg);

@@ -60,12 +60,9 @@ pub async fn run(args: Args) -> Result<()> {
     let start = Instant::now();
     let mut echoed = false;
     while start.elapsed() < Duration::from_secs(args.listen_secs) {
-        match tokio::time::timeout(Duration::from_secs(1), updates.recv()).await {
-            Ok(Ok(u)) => {
-                let mark = if u.id == args.dp { echoed = true; " <-- our DP" } else { "" };
-                println!("  +{:>3}s dp {} = {}{}", start.elapsed().as_secs(), u.id, u.value, mark);
-            }
-            _ => {}
+        if let Ok(Ok(u)) = tokio::time::timeout(Duration::from_secs(1), updates.recv()).await {
+            let mark = if u.id == args.dp { echoed = true; " <-- our DP" } else { "" };
+            println!("  +{:>3}s dp {} = {}{}", start.elapsed().as_secs(), u.id, u.value, mark);
         }
     }
     println!("\nresult: {}", if echoed { "monitor echoed the DP — control-write WORKS" } else { "no echo of that DP (it may push only on real change)" });

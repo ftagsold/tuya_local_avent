@@ -105,7 +105,14 @@ pub fn wsse_ok(body: &str, user: &str, pass: &str) -> bool {
 /// `None` when the request carries no token, else whether it is valid.
 pub fn wsse_check(body: &str, user: &str, pass: &str) -> Option<bool> {
     let username = elem_text(body, "Username")?;
-    Some(username == user && wsse_digest_ok(body, pass))
+    Some(ct_eq(&username, user) && wsse_digest_ok(body, pass))
+}
+
+/// Constant-time string comparison for secrets (timing does not reveal how
+/// many leading bytes matched).
+pub fn ct_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 fn wsse_digest_ok(body: &str, pass: &str) -> bool {
@@ -114,7 +121,7 @@ fn wsse_digest_ok(body: &str, pass: &str) -> bool {
     let created = elem_text(body, "Created").unwrap_or_default();
     if nonce_b64.is_empty() {
         // PasswordText form.
-        return supplied == pass;
+        return ct_eq(&supplied, pass);
     }
     use base64::Engine;
     use sha1::{Digest, Sha1};
@@ -126,7 +133,7 @@ fn wsse_digest_ok(body: &str, pass: &str) -> bool {
     h.update(created.trim().as_bytes());
     h.update(pass.as_bytes());
     let digest = base64::engine::general_purpose::STANDARD.encode(h.finalize());
-    digest == supplied.trim()
+    ct_eq(&digest, supplied.trim())
 }
 
 /// Pull the WS-Addressing MessageID so a ProbeMatch can relate to it.
@@ -384,7 +391,7 @@ xmlns:a=\"http://schemas.xmlsoap.org/ws/2004/08/addressing\" \
 xmlns:d=\"http://schemas.xmlsoap.org/ws/2005/04/discovery\" \
 xmlns:dn=\"http://www.onvif.org/ver10/network/wsdl\">\
 <s:Header><a:MessageID>urn:uuid:{id}</a:MessageID>\
-<a:RelatesTo>{relates_to}</a:RelatesTo>\
+<a:RelatesTo>{relates}</a:RelatesTo>\
 <a:To>http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous</a:To>\
 <a:Action>http://schemas.xmlsoap.org/ws/2005/04/discovery/ProbeMatches</a:Action></s:Header>\
 <s:Body><d:ProbeMatches><d:ProbeMatch>\
@@ -393,8 +400,10 @@ xmlns:dn=\"http://www.onvif.org/ver10/network/wsdl\">\
 <d:Scopes>onvif://www.onvif.org/Profile/Streaming onvif://www.onvif.org/name/{name}</d:Scopes>\
 <d:XAddrs>{xaddr}</d:XAddrs><d:MetadataVersion>1</d:MetadataVersion>\
 </d:ProbeMatch></d:ProbeMatches></s:Body></s:Envelope>",
-        id = cfg.device_id,
-        dev = cfg.device_id,
+        id = xml(&cfg.device_id),
+        dev = xml(&cfg.device_id),
+        // From the probe (untrusted): escaped.
+        relates = xml(relates_to),
         // Scope items are URIs: keep RFC 3986 unreserved chars only.
         name = cfg.device_name.chars().map(|c| if c.is_ascii_alphanumeric() || "-._~".contains(c) { c } else { '_' }).collect::<String>(),
     )
@@ -439,6 +448,20 @@ mod tests {
     fn profiles_advertise_h264_720p() {
         let r = dispatch("GetProfiles", "", &cfg(), false).unwrap();
         assert!(r.contains("H264") && r.contains("<tt:Width>1280</tt:Width>"));
+    }
+
+    #[test]
+    fn probe_match_escapes_message_id() {
+        let m = probe_match(&cfg(), "</a:RelatesTo><evil/>");
+        assert!(!m.contains("<evil/>"));
+        assert!(m.contains("&lt;/a:RelatesTo&gt;&lt;evil/&gt;"));
+    }
+
+    #[test]
+    fn ct_eq_compares() {
+        assert!(ct_eq("abc", "abc"));
+        assert!(!ct_eq("abc", "abd"));
+        assert!(!ct_eq("abc", "ab"));
     }
 
     #[test]

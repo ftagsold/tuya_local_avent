@@ -9,11 +9,18 @@
  *   same peer connection. go2rtc forwards it into the stream's RTSP
  *   backchannel, the bridge plays it on the monitor. Needs HTTPS (or
  *   localhost): browsers only grant the microphone to secure pages.
- * - Controls: a button group floating over the bottom of the video. A tap
- *   on a button turns the group into that control (on/off toggle + slider);
- *   a tap anywhere outside the group returns to the buttons. The night light,
- *   lullaby and volume are the bridge's MQTT entities, found on the camera's
- *   device unless set explicitly.
+ * - Controls: a button group floating over the bottom of the video, in the
+ *   configured order. Hidden until the video is tapped; hides again after
+ *   `autohide` seconds without interaction, except while a control is open
+ *   or talk is on. A tap on a button turns the group into that control
+ *   (on/off toggle + slider); a tap on the video returns to the buttons. The
+ *   night light, lullaby and volume are the bridge's MQTT entities, found on
+ *   the camera's device unless set explicitly.
+ * - Full screen: the video with its overlays and controls (Fullscreen API,
+ *   or a fixed full-window layer where the browser has none, e.g. iPhone).
+ * - Defaults: listen on/off, listen volume and talk volume when the card
+ *   loads. Browsers allow unmuted autoplay only after a user gesture: if
+ *   refused, the card starts muted and turns listen on at the first tap.
  * - Overlays: other entities' states as plain HTML text over the video.
  *
  * No build step, no dependencies: copy to /config/www and add
@@ -21,9 +28,11 @@
  */
 
 const CARD = "tuya-local-avent-card";
-const VERSION = "1.1.0";
+const VERSION = "1.2.0";
 
-const ALL_CONTROLS = ["listen", "night_light", "lullaby", "talk"];
+const ALL_CONTROLS = ["listen", "night_light", "lullaby", "talk", "fullscreen"];
+// Controls that open a panel (toggle + slider); the rest act on tap.
+const PANEL_CONTROLS = ["listen", "night_light", "lullaby", "talk"];
 // Names from 1.0 whose sliders now live inside their control.
 const LEGACY_CONTROLS = ["lullaby_volume", "talk_volume"];
 const CONTROL_LABELS = {
@@ -31,6 +40,7 @@ const CONTROL_LABELS = {
   night_light: "Night light (on/off + 33 / 66 / 100 %)",
   lullaby: "Lullaby (play/stop + volume)",
   talk: "Talk (on/off + talk volume)",
+  fullscreen: "Full screen",
 };
 const LIGHT_LEVELS = [33, 66, 100];
 const ICONS = {
@@ -38,7 +48,12 @@ const ICONS = {
   night_light: ["mdi:lightbulb-night", "mdi:lightbulb-night-outline"],
   lullaby: ["mdi:music", "mdi:music-off"],
   talk: ["mdi:microphone", "mdi:microphone-off"],
+  fullscreen: ["mdi:fullscreen-exit", "mdi:fullscreen"],
 };
+// Config defaults; the editor leaves keys at these values out of the YAML.
+const DEFAULTS = { talk_mode: "toggle", listen: false, listen_volume: 100, talk_volume: 100, autohide: 5 };
+// No decoded video frame for this long = dead stream: reconnect.
+const STALL_MS = 15000;
 const POSITIONS = {
   "top-left": "top:8px;left:8px;",
   "top-center": "top:8px;left:50%;transform:translateX(-50%);",
@@ -64,6 +79,8 @@ const STYLE = `
   :host { display: block; }
   ha-card { overflow: hidden; }
   .video { position: relative; background: #000; aspect-ratio: 16 / 9; }
+  .video:fullscreen { aspect-ratio: auto; width: 100%; height: 100%; }
+  .video.pseudo-fs { position: fixed; inset: 0; z-index: 9999; aspect-ratio: auto; }
   .video video, .video img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
   .overlay { position: absolute; z-index: 2; pointer-events: none; color: #fff; font-size: 14px;
     line-height: 1.3; text-shadow: 0 0 3px #000, 0 0 6px #000; white-space: nowrap; }
@@ -76,7 +93,8 @@ const STYLE = `
     display: flex; align-items: center; gap: 6px; padding: 6px; border-radius: 999px;
     background: rgba(20, 20, 20, .55); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
     box-shadow: 0 4px 16px rgba(0, 0, 0, .35); color: #fff;
-    max-width: calc(100% - 24px); }
+    max-width: calc(100% - 24px); transition: opacity .25s; }
+  .group.away { opacity: 0; pointer-events: none; }
   .group[hidden], .group [hidden] { display: none !important; }
   .group.open { width: min(440px, calc(100% - 24px)); }
   .btn { flex: 0 0 auto; width: 44px; height: 44px; border-radius: 50%; border: 0; padding: 0;
@@ -100,11 +118,27 @@ const STYLE = `
 class TuyaLocalAventCard extends HTMLElement {
   constructor() {
     super();
+    this._gen = 0; // bumped by _stopVideo, see _startVideo
+    // Taps inside the card are handled by the video's click handler.
     this._onOutside = (e) => {
       if (!this._open || !this._els) return;
-      if (!e.composedPath().includes(this._els.group)) this._setOpen(null);
+      if (!e.composedPath().includes(this)) this._setOpen(null);
     };
-    this._onKey = (e) => e.key === "Escape" && this._setOpen(null);
+    this._onKey = (e) => {
+      if (e.key !== "Escape") return;
+      if (this._pseudoFs) this._setPseudoFs(false);
+      this._setOpen(null);
+    };
+    this._onFullscreen = () => this._update();
+    this._unlockListen = () => {
+      document.removeEventListener("pointerdown", this._unlockListen, true);
+      if (this._listen) this._applyListen();
+      this._update();
+    };
+    this._onVisible = () => {
+      if (document.hidden || !this._mjpeg) return;
+      this._reloadMjpeg();
+    };
   }
 
   static getConfigElement() {
@@ -123,10 +157,19 @@ class TuyaLocalAventCard extends HTMLElement {
     const controls = (config.controls ?? ALL_CONTROLS).filter((c) => !LEGACY_CONTROLS.includes(c));
     const bad = controls.filter((c) => !ALL_CONTROLS.includes(c));
     if (bad.length) throw new Error(`unknown controls: ${bad.join(", ")} (use ${ALL_CONTROLS.join(", ")})`);
+    const range = (key, min, max) => {
+      const v = config[key];
+      if (v !== undefined && !(Number.isFinite(Number(v)) && v >= min && v <= max)) throw new Error(`${key} must be ${min}-${max}`);
+    };
+    range("listen_volume", 0, 100);
+    range("talk_volume", 0, 200);
+    range("autohide", 0, 3600);
     const restart = this._config && this._config.camera !== config.camera;
-    this._config = { talk_mode: "toggle", ...config, controls, overlays };
-    this._talkGain = this._loadNum("talk_gain", (this._config.talk_volume ?? 100) / 100);
-    this._listenVol = this._loadNum("listen_volume", 1);
+    this._autoReg = null; // entity overrides / camera may have changed
+    this._config = { ...DEFAULTS, ...config, controls, overlays };
+    this._talkGain = this._config.talk_volume / 100;
+    this._listenVol = this._config.listen_volume / 100;
+    this._listen = !!this._config.listen;
     this._built = false;
     this._open = null;
     if (restart) {
@@ -148,14 +191,25 @@ class TuyaLocalAventCard extends HTMLElement {
   connectedCallback() {
     document.addEventListener("pointerdown", this._onOutside, true);
     document.addEventListener("keydown", this._onKey);
-    if (this._hass && this._config && !this._pc && !this._mjpeg) this._startVideo();
+    document.addEventListener("fullscreenchange", this._onFullscreen);
+    document.addEventListener("webkitfullscreenchange", this._onFullscreen);
+    document.addEventListener("visibilitychange", this._onVisible);
+    if (this._mjpeg) this._reloadMjpeg();
+    else if (this._hass && this._config && !this._pc) this._startVideo();
   }
 
   disconnectedCallback() {
     document.removeEventListener("pointerdown", this._onOutside, true);
     document.removeEventListener("keydown", this._onKey);
+    document.removeEventListener("fullscreenchange", this._onFullscreen);
+    document.removeEventListener("webkitfullscreenchange", this._onFullscreen);
+    document.removeEventListener("visibilitychange", this._onVisible);
+    document.removeEventListener("pointerdown", this._unlockListen, true);
+    clearTimeout(this._hideTimer);
     this._stopTalk();
     this._stopVideo();
+    // A detached <img> keeps downloading the MJPEG stream.
+    if (this._mjpeg) this._els?.video.removeAttribute("src");
   }
 
   getCardSize() {
@@ -171,12 +225,18 @@ class TuyaLocalAventCard extends HTMLElement {
   _entity(key) {
     if (this._config[key]) return this._config[key];
     const reg = this._hass.entities || {};
+    // hass updates arrive often; rescan the registry only when it changes.
+    if (this._autoReg !== reg) {
+      this._autoReg = reg;
+      this._auto = {};
+    }
+    if (key in this._auto) return this._auto[key];
     const dev = reg[this._config.camera]?.device_id;
-    if (!dev) return undefined;
     const { domain, suffix } = AUTO[key];
-    return Object.values(reg).find(
-      (e) => e.device_id === dev && e.entity_id.startsWith(`${domain}.`) && e.entity_id.endsWith(suffix),
-    )?.entity_id;
+    return (this._auto[key] = dev
+      ? Object.values(reg).find((e) => e.device_id === dev && e.entity_id.startsWith(`${domain}.`) && e.entity_id.endsWith(suffix))
+          ?.entity_id
+      : undefined);
   }
 
   _state(id) {
@@ -243,13 +303,10 @@ class TuyaLocalAventCard extends HTMLElement {
     const m = this._model(key);
     if (m.disabled) return;
     switch (key) {
-      case "listen": {
-        const v = this._els.video;
-        v.muted = !v.muted;
-        v.volume = this._listenVol;
-        v.play().catch(() => {});
+      case "listen":
+        this._listen = !m.on;
+        this._applyListen();
         break;
-      }
       case "night_light": {
         const entity_id = this._entity("night_light");
         if (m.on) this._call("light", "turn_off", { entity_id });
@@ -272,7 +329,6 @@ class TuyaLocalAventCard extends HTMLElement {
       case "listen":
         this._listenVol = value / 100;
         this._els.video.volume = this._listenVol;
-        if (final) this._saveNum("listen_volume", this._listenVol);
         break;
       case "night_light":
         if (final) this._call("light", "turn_on", { entity_id: this._entity("night_light"), brightness_pct: LIGHT_LEVELS[value - 1] });
@@ -283,7 +339,6 @@ class TuyaLocalAventCard extends HTMLElement {
       case "talk":
         this._talkGain = value / 100;
         if (this._gain) this._gain.gain.value = this._talkGain;
-        if (final) this._saveNum("talk_gain", this._talkGain);
         break;
     }
   }
@@ -294,10 +349,15 @@ class TuyaLocalAventCard extends HTMLElement {
     if (!this.shadowRoot) this.attachShadow({ mode: "open" });
     const c = this._config;
     const icon = (key) => `<ha-icon icon="${ICONS[key][0]}"></ha-icon>`;
+    const panelKeys = c.controls.filter((k) => PANEL_CONTROLS.includes(k));
     const buttons = c.controls
-      .map((k) => `<button class="btn" data-open="${k}" title="${esc(CONTROL_LABELS[k])}">${icon(k)}</button>`)
+      .map((k) =>
+        PANEL_CONTROLS.includes(k)
+          ? `<button class="btn" data-open="${k}" title="${esc(CONTROL_LABELS[k])}">${icon(k)}</button>`
+          : `<button class="btn" data-fs title="${esc(CONTROL_LABELS[k])}">${icon(k)}</button>`,
+      )
       .join("");
-    const panels = c.controls
+    const panels = panelKeys
       .map(
         (k) => `<div class="panel" data-panel="${k}" hidden>
           <button class="btn" data-toggle="${k}">${icon(k)}</button>
@@ -318,12 +378,30 @@ class TuyaLocalAventCard extends HTMLElement {
         </div>
       </div></ha-card>`;
     const $ = (id) => this.shadowRoot.getElementById(id);
-    this._els = { video: $("v"), status: $("status"), overlays: $("overlays"), group: $("group"), main: $("main") };
+    this._els = { wrap: $("video"), video: $("v"), status: $("status"), overlays: $("overlays"), group: $("group"), main: $("main") };
+    this._overlayHtml = null;
+    this._pseudoFs = false;
+    if (this._mjpeg) this._showMjpeg();
     this._els.video.volume = this._listenVol;
-    if (this._stream) this._els.video.srcObject = this._stream;
+    if (this._stream) {
+      this._els.video.srcObject = this._stream;
+      this._applyListen();
+    }
 
     const group = this._els.group;
+    // A tap on the video shows or hides the controls; with a control open,
+    // it goes back to the buttons. A mouse shows them on move, so a click
+    // never hides them.
+    this._els.wrap.addEventListener("click", (e) => {
+      if (e.composedPath().includes(group)) return;
+      if (this._open) this._setOpen(null);
+      else if (this._shown && this._config.autohide > 0 && e.pointerType !== "mouse") this._setShown(false);
+      else this._poke();
+    });
+    this._els.wrap.addEventListener("pointermove", (e) => e.pointerType === "mouse" && this._poke());
+    for (const ev of ["pointerdown", "input"]) group.addEventListener(ev, () => this._poke());
     group.addEventListener("click", (e) => {
+      if (e.target.closest("[data-fs]")) return this._toggleFullscreen();
       const open = e.target.closest("[data-open]");
       if (open) return this._setOpen(open.dataset.open);
       const tog = e.target.closest("[data-toggle]");
@@ -349,6 +427,7 @@ class TuyaLocalAventCard extends HTMLElement {
       s.addEventListener("change", () => this._slide(key, Number(s.value), true));
     }
     this._built = true;
+    this._setShown(!(c.autohide > 0));
     this._setOpen(null);
   }
 
@@ -358,7 +437,85 @@ class TuyaLocalAventCard extends HTMLElement {
     this._els.main.hidden = !!key;
     this._els.group.classList.toggle("open", !!key);
     for (const p of this._els.group.querySelectorAll("[data-panel]")) p.hidden = p.dataset.panel !== key;
+    if (!key) this._rearm();
     this._update();
+  }
+
+  // ---- control visibility (autohide) ----
+
+  _setShown(on) {
+    this._shown = on;
+    this._els?.group.classList.toggle("away", !on);
+  }
+
+  // Show the controls and restart the hide countdown.
+  _poke() {
+    if (!this._els) return;
+    this._setShown(true);
+    this._rearm();
+  }
+
+  // Restart the countdown if shown. An open control or a live talk keeps
+  // the group up; closing it / stopping talk calls this again.
+  _rearm() {
+    clearTimeout(this._hideTimer);
+    const secs = Number(this._config.autohide);
+    if (!this._shown || !(secs > 0)) return;
+    this._hideTimer = setTimeout(() => {
+      if (!this._open && !this._talking) this._setShown(false);
+    }, secs * 1000);
+  }
+
+  // ---- full screen ----
+
+  _isFullscreen() {
+    if (this._pseudoFs) return true;
+    const fs = this.shadowRoot?.fullscreenElement ?? null;
+    return !!fs && fs === this._els?.wrap;
+  }
+
+  async _toggleFullscreen() {
+    const wrap = this._els.wrap;
+    if (this._isFullscreen()) {
+      if (this._pseudoFs) this._setPseudoFs(false);
+      else (document.exitFullscreen || document.webkitExitFullscreen)?.call(document);
+      return;
+    }
+    const req = wrap.requestFullscreen || wrap.webkitRequestFullscreen;
+    try {
+      if (!req) throw new Error("no Fullscreen API");
+      await req.call(wrap, { navigationUI: "hide" });
+    } catch (e) {
+      console.info(CARD, "fullscreen fallback:", e.message || e);
+      this._setPseudoFs(true);
+    }
+  }
+
+  // Fixed full-window layer for browsers without element fullscreen.
+  _setPseudoFs(on) {
+    this._pseudoFs = on;
+    this._els.wrap.classList.toggle("pseudo-fs", on);
+    this._update();
+  }
+
+  // ---- listen ----
+
+  // The video element follows the listen state. Unmuting without a user
+  // gesture is refused (Chrome pauses the video): play muted and retry at
+  // the next tap anywhere.
+  _applyListen() {
+    const v = this._els?.video;
+    if (!v || this._mjpeg) return;
+    v.volume = this._listenVol;
+    v.muted = !this._listen;
+    this._update();
+    v.play().catch((e) => {
+      if (e.name !== "NotAllowedError" || v.muted) return;
+      v.muted = true;
+      v.play().catch(() => {});
+      document.addEventListener("pointerdown", this._unlockListen, true);
+      this._update();
+    });
   }
 
   _sliderText(key, value) {
@@ -370,19 +527,21 @@ class TuyaLocalAventCard extends HTMLElement {
   _update() {
     if (!this._els) return;
     const root = this.shadowRoot;
+    const fs = root.querySelector("[data-fs] ha-icon");
+    if (fs) fs.setAttribute("icon", ICONS.fullscreen[this._isFullscreen() ? 0 : 1]);
     for (const key of this._config.controls) {
+      if (!PANEL_CONTROLS.includes(key)) continue;
       const m = this._model(key);
-      const [onIcon, offIcon] = ICONS[key];
-      const btn = root.querySelector(`[data-open="${key}"]`);
-      btn.classList.toggle("on", m.on && key !== "talk");
-      btn.classList.toggle("talking", key === "talk" && m.on);
-      btn.querySelector("ha-icon").setAttribute("icon", m.on || key === "talk" ? onIcon : offIcon);
+      const talk = key === "talk";
+      const icon = ICONS[key][m.on || talk ? 0 : 1];
       const tog = root.querySelector(`[data-toggle="${key}"]`);
-      tog.classList.toggle("on", m.on && key !== "talk");
-      tog.classList.toggle("talking", key === "talk" && m.on);
+      for (const b of [root.querySelector(`[data-open="${key}"]`), tog]) {
+        b.classList.toggle("on", m.on && !talk);
+        b.classList.toggle("talking", talk && m.on);
+        b.querySelector("ha-icon").setAttribute("icon", icon);
+      }
       tog.disabled = m.disabled;
       tog.title = m.note || (m.on ? "Turn off" : "Turn on");
-      tog.querySelector("ha-icon").setAttribute("icon", m.on || key === "talk" ? onIcon : offIcon);
       const s = root.querySelector(`[data-slider="${key}"]`);
       if (root.activeElement !== s) {
         Object.assign(s, { min: m.slider.min, max: m.slider.max, step: m.slider.step });
@@ -418,7 +577,7 @@ class TuyaLocalAventCard extends HTMLElement {
         const pos = POSITIONS[ov.position || "top-right"] ?? "";
         const custom = ["top", "left", "right", "bottom"]
           .filter((k) => ov[k] !== undefined)
-          .map((k) => `${k}:${typeof ov[k] === "number" ? `${ov[k]}%` : ov[k]};`)
+          .map((k) => `${k}:${typeof ov[k] === "number" ? `${ov[k]}%` : esc(ov[k])};`)
           .join("");
         const style = `${custom || pos}${ov.style ? esc(ov.style) : ""}`;
         return `<div class="overlay" style="${style}">${label}${esc(text)}</div>`;
@@ -442,13 +601,19 @@ class TuyaLocalAventCard extends HTMLElement {
     if (this._starting || this._pc || !this._hass || !this._config) return;
     this._starting = true;
     const entity_id = this._config.camera;
+    // _stopVideo (disconnect, camera change, retry) bumps the generation: a
+    // start still awaiting HA must not leave a connection behind.
+    const gen = this._gen;
+    const stale = () => gen !== this._gen || !this.isConnected;
     try {
       const caps = await this._hass.callWS({ type: "camera/capabilities", entity_id }).catch(() => null);
+      if (stale()) return;
       if (caps && !caps.frontend_stream_types?.includes("web_rtc")) {
-        this._startMjpeg("Live audio and talk need WebRTC (HA's go2rtc); showing MJPEG.");
+        this._startMjpeg("No WebRTC in Home Assistant (go2rtc): low-quality MJPEG, no listen or talk.");
         return;
       }
       const client = await this._hass.callWS({ type: "camera/webrtc/get_client_config", entity_id });
+      if (stale()) return;
       const pc = new RTCPeerConnection(client.configuration || {});
       this._pc = pc;
       if (client.dataChannel) pc.createDataChannel(client.dataChannel);
@@ -465,9 +630,10 @@ class TuyaLocalAventCard extends HTMLElement {
         stream.addTrack(e.track);
         if (this._els) {
           this._els.video.srcObject = stream;
-          this._els.video.play().catch(() => {});
+          this._applyListen();
         }
       };
+      this._watch(pc);
       pc.onconnectionstatechange = () => {
         if (pc !== this._pc) return;
         if (pc.connectionState === "connected") this._setStatus("");
@@ -489,7 +655,8 @@ class TuyaLocalAventCard extends HTMLElement {
       let answered = false;
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
-      this._unsub = await this._hass.connection.subscribeMessage(
+      if (pc !== this._pc) return; // stopped meanwhile: _stopVideo closed it
+      const unsub = await this._hass.connection.subscribeMessage(
         async (msg) => {
           if (pc !== this._pc) return;
           switch (msg.type) {
@@ -513,27 +680,79 @@ class TuyaLocalAventCard extends HTMLElement {
         },
         { type: "camera/webrtc/offer", entity_id, offer: offer.sdp },
       );
+      // Ends HA's WebRTC session; drop it at once if stopped meanwhile.
+      if (pc !== this._pc) unsub().catch?.(() => {});
+      else this._unsub = unsub;
       this._update();
     } catch (e) {
       console.warn(CARD, "webrtc", e);
       this._restartVideo(`Cannot start the stream: ${e.message || e.code || e}`);
     } finally {
       this._starting = false;
+      // Re-attached while this start was in flight: that connect was
+      // refused by `_starting`, so start again for the current generation.
+      if (stale() && this.isConnected && !this._pc && !this._retry && !this._mjpeg) this._startVideo();
     }
   }
 
+  // Restart a connection whose video stopped decoding (connection state
+  // can stay "connected" while no media flows, e.g. after the source
+  // restarted or the app was backgrounded). Paused while the page is hidden.
+  _watch(pc) {
+    let frames = -1;
+    let since = Date.now();
+    clearInterval(this._watchTimer);
+    this._watchTimer = setInterval(async () => {
+      if (document.hidden) {
+        since = Date.now();
+        return;
+      }
+      const stats = await pc.getStats().catch(() => null);
+      if (pc !== this._pc || !stats) return;
+      let n = 0;
+      stats.forEach((r) => {
+        if (r.type === "inbound-rtp" && r.kind === "video") n = r.framesDecoded ?? 0;
+      });
+      if (n !== frames) {
+        frames = n;
+        since = Date.now();
+      } else if (Date.now() - since > STALL_MS) {
+        console.warn(CARD, `no video frame for ${STALL_MS / 1000} s, reconnecting`);
+        this._restartVideo("Stream stalled, reconnecting…");
+      }
+    }, 3000);
+  }
+
   _startMjpeg(note) {
-    const st = this._state(this._config.camera);
-    if (!st || !this._els) return;
+    if (!this._els) return;
     this._mjpeg = true;
-    const img = document.createElement("img");
-    img.src = `/api/camera_proxy_stream/${this._config.camera}?token=${st.attributes.access_token}`;
-    this._els.video.replaceWith(img);
-    this._els.video = img;
-    this._els.video.muted = true;
-    this._setStatus("");
+    this._showMjpeg();
+    this._setStatus(note);
+    setTimeout(() => this._mjpeg && this._setStatus(""), 8000);
     this._update();
     console.info(CARD, note);
+  }
+
+  // Swap the <video> for an MJPEG <img> (also after a re-render).
+  _showMjpeg() {
+    const img = document.createElement("img");
+    // HA ends the MJPEG stream on errors / restarts: reload after a pause.
+    img.onerror = () => {
+      clearTimeout(this._retry);
+      this._retry = setTimeout(() => this._reloadMjpeg(), 5000);
+    };
+    img.muted = true;
+    this._els.video.replaceWith(img);
+    this._els.video = img;
+    this._reloadMjpeg();
+  }
+
+  _reloadMjpeg() {
+    const st = this._state(this._config.camera);
+    const img = this._els?.video;
+    if (!st || !(img instanceof HTMLImageElement)) return;
+    const q = new URLSearchParams({ token: st.attributes.access_token, t: Date.now() });
+    img.src = `/api/camera_proxy_stream/${encodeURIComponent(this._config.camera)}?${q}`;
   }
 
   _restartVideo(msg) {
@@ -548,7 +767,9 @@ class TuyaLocalAventCard extends HTMLElement {
   }
 
   _stopVideo() {
+    this._gen = (this._gen ?? 0) + 1;
     clearTimeout(this._retry);
+    clearInterval(this._watchTimer);
     this._retry = null;
     if (this._unsub) {
       this._unsub().catch?.(() => {});
@@ -602,22 +823,8 @@ class TuyaLocalAventCard extends HTMLElement {
       this._mic = null;
     }
     this._gain = null;
+    this._rearm();
     this._update();
-  }
-
-  // Per-browser, per-camera settings (talk gain, listen volume).
-  _loadNum(name, fallback) {
-    try {
-      const v = Number(localStorage.getItem(`${CARD}:${name}:${this._config.camera}`));
-      if (localStorage.getItem(`${CARD}:${name}:${this._config.camera}`) !== null && Number.isFinite(v)) return v;
-    } catch (_) {}
-    return fallback;
-  }
-
-  _saveNum(name, value) {
-    try {
-      localStorage.setItem(`${CARD}:${name}:${this._config.camera}`, String(value));
-    } catch (_) {}
   }
 }
 
@@ -627,14 +834,20 @@ const SCHEMA = [
   { name: "camera", required: true, selector: { entity: { domain: "camera" } } },
   { name: "title", selector: { text: {} } },
   {
-    name: "controls",
-    selector: {
-      select: { multiple: true, mode: "list", options: ALL_CONTROLS.map((value) => ({ value, label: CONTROL_LABELS[value] })) },
-    },
-  },
-  {
     name: "talk_mode",
     selector: { select: { mode: "dropdown", options: [{ value: "toggle", label: "Tap to start / stop" }, { value: "hold", label: "Hold to talk" }] } },
+  },
+  {
+    type: "expandable",
+    name: "defaults",
+    flatten: true,
+    title: "Defaults (when the card loads)",
+    schema: [
+      { name: "listen", selector: { boolean: {} } },
+      { name: "listen_volume", selector: { number: { min: 0, max: 100, step: 5, mode: "slider", unit_of_measurement: "%" } } },
+      { name: "talk_volume", selector: { number: { min: 0, max: 200, step: 5, mode: "slider", unit_of_measurement: "%" } } },
+      { name: "autohide", selector: { number: { min: 0, max: 60, step: 1, mode: "box", unit_of_measurement: "s" } } },
+    ],
   },
   {
     type: "expandable",
@@ -652,13 +865,28 @@ const SCHEMA = [
 const EDITOR_LABELS = {
   camera: "Camera (ONVIF)",
   title: "Title",
-  controls: "Controls to show",
   talk_mode: "Talk toggle",
+  listen: "Listen on",
+  listen_volume: "Listen volume",
+  talk_volume: "Talk volume",
+  autohide: "Hide controls after (0 = always shown)",
   night_light: "Night light",
   lullaby: "Lullaby",
   volume: "Lullaby volume",
   overlays: "Overlays (list of {entity, position, name, attribute, text, style})",
 };
+const EDITOR_STYLE = `
+  .tlac-controls { margin: 16px 0 8px; }
+  .tlac-controls h3 { font-size: 14px; font-weight: 500; margin: 0 0 4px; }
+  .tlac-controls .hint { font-size: 12px; color: var(--secondary-text-color); margin-bottom: 4px; }
+  .tlac-row { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
+  .tlac-row.off { opacity: .55; }
+  .tlac-row label { flex: 1 1 auto; display: flex; align-items: center; gap: 8px; cursor: pointer; }
+  .tlac-row button { width: 32px; height: 32px; border: 0; border-radius: 50%; background: none; cursor: pointer;
+    color: var(--primary-text-color); display: inline-flex; align-items: center; justify-content: center; }
+  .tlac-row button:hover:not([disabled]) { background: var(--secondary-background-color, rgba(127, 127, 127, .15)); }
+  .tlac-row button[disabled] { opacity: .3; cursor: default; }
+`;
 
 class TuyaLocalAventCardEditor extends HTMLElement {
   setConfig(config) {
@@ -671,27 +899,76 @@ class TuyaLocalAventCardEditor extends HTMLElement {
     this._render();
   }
 
+  _controls() {
+    return (this._config.controls ?? ALL_CONTROLS).filter((c) => ALL_CONTROLS.includes(c));
+  }
+
+  _emit(config) {
+    for (const k of Object.keys(config)) {
+      if (config[k] === "" || config[k] === undefined || (k in DEFAULTS && config[k] === DEFAULTS[k])) delete config[k];
+    }
+    this._config = config;
+    this.dispatchEvent(new CustomEvent("config-changed", { detail: { config }, bubbles: true, composed: true }));
+  }
+
   _render() {
     if (!this._hass || !this._config) return;
     if (!this._form) {
+      const style = document.createElement("style");
+      style.textContent = EDITOR_STYLE;
       this._form = document.createElement("ha-form");
       this._form.computeLabel = (s) => EDITOR_LABELS[s.name] ?? s.name;
       this._form.computeHelper = (s) =>
         s.name === "overlays"
           ? `position: ${Object.keys(POSITIONS).join(" | ")}, or top/left/right/bottom (number = %)`
           : undefined;
-      this._form.addEventListener("value-changed", (e) => {
-        const config = { ...e.detail.value };
-        for (const k of Object.keys(config)) if (config[k] === "" || config[k] === undefined) delete config[k];
-        this._config = config;
-        this.dispatchEvent(new CustomEvent("config-changed", { detail: { config }, bubbles: true, composed: true }));
-      });
-      this.appendChild(this._form);
+      this._form.addEventListener("value-changed", (e) => this._emit({ ...e.detail.value, controls: this._controls() }));
+      this._list = document.createElement("div");
+      this._list.className = "tlac-controls";
+      this._list.addEventListener("click", (e) => this._onList(e));
+      this._list.addEventListener("change", (e) => this._onList(e));
+      this.append(style, this._form, this._list);
     }
     this._form.hass = this._hass;
     this._form.schema = SCHEMA;
-    const controls = (this._config.controls ?? ALL_CONTROLS).filter((c) => !LEGACY_CONTROLS.includes(c));
-    this._form.data = { talk_mode: "toggle", ...this._config, controls };
+    this._form.data = { ...DEFAULTS, ...this._config };
+    this._renderList();
+  }
+
+  // Controls: checkbox = shown, arrows = order in the button group.
+  _renderList() {
+    const on = this._controls();
+    const rows = [...on, ...ALL_CONTROLS.filter((k) => !on.includes(k))];
+    this._list.innerHTML = `<h3>Controls</h3><div class="hint">Shown controls, in button order</div>${rows
+      .map((k) => {
+        const i = on.indexOf(k);
+        return `<div class="tlac-row ${i < 0 ? "off" : ""}">
+          <label><input type="checkbox" data-key="${k}" ${i < 0 ? "" : "checked"}>
+            <ha-icon icon="${ICONS[k][PANEL_CONTROLS.includes(k) ? 0 : 1]}"></ha-icon>${esc(CONTROL_LABELS[k])}</label>
+          <button data-move="${k}" data-dir="-1" title="Move up" ${i > 0 ? "" : "disabled"}><ha-icon icon="mdi:arrow-up"></ha-icon></button>
+          <button data-move="${k}" data-dir="1" title="Move down" ${i >= 0 && i < on.length - 1 ? "" : "disabled"}><ha-icon icon="mdi:arrow-down"></ha-icon></button>
+        </div>`;
+      })
+      .join("")}`;
+  }
+
+  _onList(e) {
+    const on = this._controls();
+    const cb = e.type === "change" && e.target.closest("input[data-key]");
+    const mv = e.type === "click" && e.target.closest("button[data-move]");
+    if (cb) {
+      const k = cb.dataset.key;
+      // Newly checked controls go to the end of the order.
+      const next = cb.checked ? [...on.filter((x) => x !== k), k] : on.filter((x) => x !== k);
+      this._emit({ ...this._config, controls: next });
+    } else if (mv) {
+      const i = on.indexOf(mv.dataset.move);
+      const j = i + Number(mv.dataset.dir);
+      if (i < 0 || j < 0 || j >= on.length) return;
+      [on[i], on[j]] = [on[j], on[i]];
+      this._emit({ ...this._config, controls: on });
+    } else return;
+    this._renderList();
   }
 }
 

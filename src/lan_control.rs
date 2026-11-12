@@ -108,12 +108,10 @@ async fn session_loop(
     loop {
         tokio::select! {
             frame = s.recv(Duration::from_secs(1)) => {
-                match frame? {
-                    Some((_h, plain)) => {
-                        last_rx = Instant::now();
-                        publish_dps(&plain, updates);
-                    }
-                    None => {} // read timeout, loop
+                // None = read timeout, loop.
+                if let Some((_h, plain)) = frame? {
+                    last_rx = Instant::now();
+                    publish_dps(&plain, updates);
                 }
             }
             req = write_rx.recv() => {

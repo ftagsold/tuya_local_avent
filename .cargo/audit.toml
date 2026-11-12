@@ -1,0 +1,5 @@
+# cargo audit: accepted advisories.
+[advisories]
+# rsa Marvin attack: timing of private-key operations. This crate only
+# encrypts with Tuya's public key (login); private keys exist only in tests.
+ignore = ["RUSTSEC-2023-0071"]

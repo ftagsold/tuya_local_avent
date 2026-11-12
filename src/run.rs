@@ -445,7 +445,7 @@ pub async fn run(env: Env) -> Result<()> {
             last_bridge_restart = std::time::Instant::now();
             // Every third failed bridge restart, also refresh the password
             // (the monitor may have been re-paired).
-            if bridge_restarts % 3 == 0 && env.has_cloud() {
+            if bridge_restarts.is_multiple_of(3) && env.has_cloud() {
                 tracing::warn!("video still down; refreshing the P2P password from the cloud");
                 match cloud_fetch(&env, &mut cache, &cache_path).await {
                     Ok(fresh) => {

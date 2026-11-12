@@ -191,18 +191,29 @@ Set `ONVIF_BIND_IP` to the container's `ipv4_address`.
 `card/tuya-local-avent-card.js` is a dependency-free Lovelace card:
 
 - **Video + listen audio** from the ONVIF camera entity over Home
-  Assistant's own WebRTC (built-in go2rtc). No transcoding in the card.
+  Assistant's own WebRTC (built-in go2rtc). No transcoding in the card. If
+  HA offers no WebRTC for the camera (go2rtc integration missing), the card
+  falls back to HA's MJPEG proxy and says so: low quality, no listen/talk.
+  A WebRTC stream that stops decoding for 15 s is reconnected.
 - **Talk**: the browser microphone on a send-only track of the same WebRTC
-  session, with a talk volume (gain, 0-200 %, remembered per browser). Tap to
-  start/stop, or `talk_mode: hold`. Needs HA over HTTPS (browsers grant the
-  microphone only to secure pages).
+  session, with a talk volume (gain, 0-200 %). Tap to start/stop, or
+  `talk_mode: hold`. Needs HA over HTTPS (browsers grant the microphone only
+  to secure pages).
 - **Controls**: a button group floating at the bottom center of the video:
-  listen, night light, lullaby, talk (each optional). Tapping one turns the
-  group into that control: an on/off toggle on the left and its slider
-  (listen volume, night light 33/66/100 %, lullaby volume, talk volume). A
-  tap anywhere outside the group (or Esc) goes back to the buttons. The MQTT
-  entities are found on the camera's device; set them explicitly if HA did
-  not merge the devices.
+  listen, night light, lullaby, talk, full screen (each optional, in the
+  configured order). Hidden until the video is tapped; hidden again after
+  `autohide` seconds without interaction, but kept while a control is open
+  or talk is on. Tapping a button turns the group into that control: an
+  on/off toggle on the left and its slider (listen volume, night light
+  33/66/100 %, lullaby volume, talk volume). A tap on the video (or Esc)
+  goes back to the buttons. The MQTT entities are found on the camera's
+  device; set them explicitly if HA did not merge the devices.
+- **Full screen**: the video with overlays and controls. Uses the
+  Fullscreen API, or a full-window layer where the browser has none
+  (iPhone).
+- **Defaults**: listen on/off, listen volume and talk volume when the card
+  loads. Browsers allow sound only after a user gesture: if refused, the
+  card starts muted and turns listen on at the first tap.
 - **Overlays**: other entities' states as transparent HTML text over the
   video, at a named position or at explicit `top/left/right/bottom`.
 
@@ -214,8 +225,12 @@ card has a visual editor; YAML:
 type: custom:tuya-local-avent-card
 camera: camera.nursery
 title: Nursery                 # optional
-controls: [listen, night_light, lullaby, talk]
+controls: [listen, night_light, lullaby, talk, fullscreen]   # shown, in order
 talk_mode: toggle            # or hold
+listen: false                # default: listen on at load
+listen_volume: 100           # default listen volume, 0-100 %
+talk_volume: 100             # default talk gain, 0-200 %
+autohide: 5                  # hide controls after N s; 0 = always shown
 # night_light: light.nursery_night_light   # optional overrides
 # lullaby: select.nursery_lullaby
 # volume: number.nursery_volume

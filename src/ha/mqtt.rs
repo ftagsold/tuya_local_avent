@@ -215,10 +215,19 @@ async fn handle_command(cfg: &Config, control: &Control, topic: &str, value: &st
     }
     let raw: Value = match d.kind {
         Kind::Switch | Kind::Light => json!(value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("on")),
-        Kind::Number => json!(value.parse::<f64>().map(|n| (n * d.scale) as i64).unwrap_or(0)),
+        Kind::Number => {
+            let Ok(n) = value.parse::<f64>() else { return Ok(()) };
+            let n = if d.max > d.min { n.clamp(d.min, d.max) } else { n };
+            json!((n * d.scale) as i64)
+        }
         // HA sends 0..=brightness_scale; the monitor takes 1..=100.
         Kind::Brightness => json!(value.parse::<f64>().map(|n| n.round().clamp(d.min, d.max) as i64).unwrap_or(d.max as i64)),
-        Kind::Select => json!(value),
+        // Only the advertised options reach the monitor.
+        Kind::Select if d.options.contains(&value) => json!(value),
+        Kind::Select => {
+            tracing::warn!("MQTT {slug}: ignoring unknown option {value:?}");
+            return Ok(());
+        }
         _ => return Ok(()),
     };
     let mut dps = BTreeMap::new();

@@ -102,6 +102,17 @@ customElements.define(
         const ids = Object.keys(this._hass?.states || {}).filter((e) => !sel.entity.domain || e.startsWith(`${sel.entity.domain}.`));
         input.innerHTML = `<option value="">(auto)</option>` + ids.map((e) => `<option ${e === v ? "selected" : ""}>${e}</option>`).join("");
         input.onchange = () => this.emit(s.name, input.value || undefined);
+      } else if (sel.boolean) {
+        input = document.createElement("input");
+        input.type = "checkbox";
+        input.checked = !!v;
+        input.onchange = () => this.emit(s.name, input.checked);
+      } else if (sel.number) {
+        input = document.createElement("input");
+        input.type = sel.number.mode === "slider" ? "range" : "number";
+        Object.assign(input, { min: sel.number.min, max: sel.number.max, step: sel.number.step ?? 1 });
+        input.value = v ?? "";
+        input.onchange = () => this.emit(s.name, input.value === "" ? undefined : Number(input.value));
       } else if (sel.select && sel.select.multiple) {
         input = document.createElement("div");
         for (const o of sel.select.options) {
@@ -297,7 +308,7 @@ function push() {
 const DEFAULT_CONFIG = `type: custom:tuya-local-avent-card
 camera: camera.nursery
 title: Nursery (harness)
-controls: [listen, night_light, lullaby, talk]
+controls: [listen, night_light, lullaby, talk, fullscreen]
 talk_mode: toggle
 overlays:
   - entity: sensor.nursery_temperature
