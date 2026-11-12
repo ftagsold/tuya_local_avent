@@ -192,9 +192,7 @@ pub async fn run(env: Env) -> Result<()> {
     let cache_path = media::data_file(&env.data_dir, "cloud.json");
     let mut cache = Cache::load(&cache_path);
 
-    // 0. Pin the interface MAC first, before any peer caches the old one.
-    let host_ip = if env.onvif_host_ip.is_empty() { local_ip().unwrap_or_else(|| "127.0.0.1".into()) } else { env.onvif_host_ip.clone() };
-    crate::onvif::pin_mac(&host_ip, &env.onvif_mac).await;
+    crate::onvif::check_mac(&env.onvif_mac);
 
     // 1. P2P password: env, else the last cloud fetch, else the cloud now.
     let (mut p2p, mut source) = if !env.p2p_password.is_empty() {
@@ -381,6 +379,7 @@ pub async fn run(env: Env) -> Result<()> {
     }
 
     // 8. ONVIF for UniFi Protect / Home Assistant.
+    let host_ip = if env.onvif_host_ip.is_empty() { local_ip().unwrap_or_else(|| "127.0.0.1".into()) } else { env.onvif_host_ip.clone() };
     let ocfg = crate::onvif::Config {
         stream_uri: format!("rtsp://{}{host_ip}:{}/{path}", media::userinfo(&env.rtsp_user, &env.rtsp_pass), env.rtsp_port),
         stream_uri_plain: format!("rtsp://{host_ip}:{}/{path}", env.rtsp_port),

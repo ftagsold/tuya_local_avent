@@ -210,50 +210,34 @@ pub fn parse_mac(s: &str) -> Option<String> {
     Some(b.iter().map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(":"))
 }
 
-/// Set the MAC of the interface holding `ip` to `mac`. Protect keys a camera
-/// by MAC (ARP at discovery, GetNetworkInterfaces after adoption): a random
-/// macvlan MAC makes it offer the adopted camera again. Needs NET_ADMIN; on
-/// failure only warns, as the compose file may pin `mac_address` instead.
+/// Warn unless an interface carries `mac`. Protect keys a camera by MAC
+/// (ARP at discovery, GetNetworkInterfaces after adoption): a random macvlan
+/// MAC makes it offer the adopted camera again. The runtime must set it at
+/// creation (`--mac-address` / compose `mac_address`); changing it live broke
+/// broadcast reception, so LAN discovery.
 #[cfg(target_os = "linux")]
-pub async fn pin_mac(ip: &str, mac: &str) {
-    use tokio::process::Command;
-    let out = |args: &[&str]| {
-        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-        async move { Command::new("ip").args(&args).output().await }
-    };
-    let Ok(addrs) = out(&["-o", "-4", "addr", "show"]).await else {
-        tracing::warn!("ONVIF MAC: `ip` not found; cannot pin {mac}");
-        return;
-    };
-    let needle = format!("inet {ip}/");
-    let Some(ifname) = String::from_utf8_lossy(&addrs.stdout)
-        .lines()
-        .find(|l| l.contains(&needle))
-        .and_then(|l| l.split_whitespace().nth(1))
-        .map(|n| n.split('@').next().unwrap_or(n).to_string())
-    else {
-        tracing::warn!("ONVIF MAC: no interface holds {ip}; cannot pin {mac}");
-        return;
-    };
-    if let Ok(link) = out(&["-o", "link", "show", "dev", &ifname]).await {
-        if String::from_utf8_lossy(&link.stdout).contains(&format!("link/ether {mac} ")) {
-            tracing::info!("ONVIF MAC {mac} on {ifname}");
-            return;
-        }
-    }
-    match out(&["link", "set", "dev", &ifname, "address", mac]).await {
-        Ok(o) if o.status.success() => tracing::info!("ONVIF MAC {mac} set on {ifname}"),
-        Ok(o) => tracing::warn!(
-            "ONVIF MAC: setting {mac} on {ifname} failed ({}); add cap_add NET_ADMIN or set mac_address in compose, else Protect re-offers the camera",
-            String::from_utf8_lossy(&o.stderr).trim()
-        ),
-        Err(e) => tracing::warn!("ONVIF MAC: ip link set: {e}"),
+pub fn check_mac(mac: &str) {
+    let found: Vec<String> = std::fs::read_dir("/sys/class/net")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_name() != "lo")
+        .filter_map(|e| std::fs::read_to_string(e.path().join("address")).ok())
+        .map(|a| a.trim().to_string())
+        .collect();
+    if found.iter().any(|a| a == mac) {
+        tracing::info!("ONVIF MAC {mac}");
+    } else {
+        tracing::warn!(
+            "ONVIF MAC {mac} is on no interface (have {}): run the container with --mac-address={mac} (compose: mac_address), else Protect re-offers the camera",
+            found.join(", ")
+        );
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-pub async fn pin_mac(_ip: &str, mac: &str) {
-    tracing::debug!("ONVIF MAC {mac}: pinning only on Linux");
+pub fn check_mac(mac: &str) {
+    tracing::debug!("ONVIF MAC {mac}: interface check only on Linux");
 }
 
 /// The snapshot access token: HMAC-SHA256(ONVIF password, device id), so it
