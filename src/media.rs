@@ -177,7 +177,9 @@ pub struct Overlay<'a> {
 ///   hanging; `-progress pipe:1` feeds the stall watchdog in `supervise`.
 /// - VAAPI: decode and overlay stay on the CPU, the GPU encodes (~1/4 of
 ///   the CPU of libx264). h264_vaapi writes one slice per frame and SPS/PPS
-///   before every IDR on its own.
+///   before every IDR on its own. `-sei 0`: no HRD in the SPS and no timing
+///   SEI on every frame (libx264 sends neither); with them Protect's live
+///   view stays broken while HA plays.
 pub fn relay_args(input: &str, output: &str, overlay: Option<Overlay>, encoder: &Encoder) -> Vec<String> {
     let mut a: Vec<String> = Vec::new();
     if let Encoder::Vaapi(device) = encoder {
@@ -201,7 +203,7 @@ pub fn relay_args(input: &str, output: &str, overlay: Option<Overlay>, encoder: 
             vf.push_str(",format=nv12,hwupload");
             &[
                 "-c:v", "h264_vaapi", "-profile:v", "main", "-bf", "0", "-g", "50",
-                "-rc_mode", "VBR", "-b:v", "2000k", "-maxrate", "2500k", "-bufsize", "5000k",
+                "-rc_mode", "VBR", "-b:v", "2000k", "-maxrate", "2500k", "-bufsize", "5000k", "-sei", "0",
             ]
         }
         // superfast: ~25% less CPU than veryfast at 720p25. 4 threads:
@@ -521,6 +523,7 @@ mod tests {
         let vf = &a[a.iter().position(|x| x == "-vf").unwrap() + 1];
         assert!(vf.ends_with(",format=nv12,hwupload"));
         assert!(a.iter().any(|x| x == "h264_vaapi"));
+        assert!(a.windows(2).any(|w| w == ["-sei", "0"]));
         assert!(!a.iter().any(|x| x == "libx264"));
         let x = relay_args("in", "out", None, &Encoder::X264);
         assert!(!x.iter().any(|x| x.contains("vaapi")));
