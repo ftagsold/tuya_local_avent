@@ -143,7 +143,7 @@ Optional:
 | `MQTT_HOST` / `MQTT_PORT` / `MQTT_USER` / `MQTT_PASS` | — / 1883 / — / — (unset `MQTT_HOST` disables HA control) |
 | `ONVIF_USER` / `ONVIF_PORT` / `ONVIF_BIND_IP` | `avent` / 8000 / auto |
 | `ONVIF_MODEL` | camera name (Protect names the adopted camera "manufacturer model") |
-| `ONVIF_MANUFACTURER` | empty (Protect then shows the model alone) |
+| `ONVIF_MANUFACTURER` | empty (the model is then reported as the manufacturer, so Protect shows it alone) |
 | `ONVIF_MAC` | derived from the device id (reported over ONVIF and MQTT; give the container this MAC) |
 | `RTSP_USER` / `RTSP_PASS` | `ONVIF_USER` / `ONVIF_PASS` |
 | `RTSP_PORT` | `8554` (TCP) |

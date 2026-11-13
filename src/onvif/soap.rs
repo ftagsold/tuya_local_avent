@@ -204,6 +204,10 @@ fn system_date() -> String {
 }
 
 fn device_info(cfg: &Config) -> String {
+    // Protect names the camera "<manufacturer> <model>": with no
+    // manufacturer the model goes first, so the name has no leading space.
+    let (manufacturer, model) =
+        if cfg.manufacturer.is_empty() { (&cfg.model, &cfg.manufacturer) } else { (&cfg.manufacturer, &cfg.model) };
     format!(
         "<tds:GetDeviceInformationResponse>\
 <tds:Manufacturer>{}</tds:Manufacturer>\
@@ -212,7 +216,7 @@ fn device_info(cfg: &Config) -> String {
 <tds:SerialNumber>{}</tds:SerialNumber>\
 <tds:HardwareId>avent-{}</tds:HardwareId>\
 </tds:GetDeviceInformationResponse>",
-        xml(&cfg.manufacturer), xml(&cfg.model), xml(&cfg.device_id), xml(&cfg.device_id)
+        xml(manufacturer), xml(model), xml(&cfg.device_id), xml(&cfg.device_id)
     )
 }
 
@@ -560,9 +564,13 @@ mod tests {
     }
 
     #[test]
-    fn device_info_reports_model_escaped() {
+    fn device_info_puts_name_first_without_manufacturer() {
         let r = dispatch("GetDeviceInformation", "", &cfg(), false).unwrap();
+        assert!(r.contains("<tds:Manufacturer>Nursery &lt;3</tds:Manufacturer>"));
+        assert!(r.contains("<tds:Model></tds:Model>"));
+        let c = Config { manufacturer: "Philips".into(), ..cfg() };
+        let r = dispatch("GetDeviceInformation", "", &c, false).unwrap();
+        assert!(r.contains("<tds:Manufacturer>Philips</tds:Manufacturer>"));
         assert!(r.contains("<tds:Model>Nursery &lt;3</tds:Model>"));
-        assert!(r.contains("<tds:Manufacturer></tds:Manufacturer>"));
     }
 }
