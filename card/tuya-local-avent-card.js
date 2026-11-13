@@ -17,8 +17,8 @@
  *   night light, lullaby, lullaby track, lullaby playing and volume are the
  *   bridge's MQTT entities, found on the camera's device unless set
  *   explicitly. The lullaby panel also picks the track and the auto-stop
- *   timer; play first sets `default_timer`, then starts `default_track` (or
- *   resumes the monitor's current track).
+ *   timer; play first sets `default_timer` and `default_volume`, then starts
+ *   `default_track` (or resumes the monitor's current track).
  * - Sliders: drawn by the card (pointer events), not <input type=range>:
  *   they follow the turned landscape stage and hold a sent value until the
  *   entity reports it, so a state update does not jump the thumb back.
@@ -255,6 +255,7 @@ class TuyaLocalAventCard extends HTMLElement {
     range("listen_volume", 0, 100);
     range("talk_volume", 0, 200);
     range("autohide", 0, 3600);
+    range("default_volume", 1, 100);
     const restart = this._config && this._config.camera !== config.camera;
     this._autoReg = null; // entity overrides / camera may have changed
     this._config = { ...DEFAULTS, ...config, controls, overlays };
@@ -431,14 +432,17 @@ class TuyaLocalAventCard extends HTMLElement {
           this._call("select", "select_option", { entity_id: this._entity("lullaby"), option: "stop" });
           break;
         }
-        // Timer before play: the monitor starts its countdown with the track.
+        // Timer and volume before play: the monitor starts its countdown with the track.
         const timer = this._entity("lullaby_timer");
         const track = this._entity("lullaby_track");
-        const { default_timer: t, default_track: def } = this._config;
-        (t && timer ? this._call("select", "select_option", { entity_id: timer, option: t }) : Promise.resolve()).then(() => {
-          if (def && track) this._call("select", "select_option", { entity_id: track, option: def });
-          else this._call("select", "select_option", { entity_id: this._entity("lullaby"), option: "play" });
-        });
+        const volume = this._entity("volume");
+        const { default_timer: t, default_track: def, default_volume: v } = this._config;
+        (t && timer ? this._call("select", "select_option", { entity_id: timer, option: t }) : Promise.resolve())
+          .then(() => (v && volume ? this._call("number", "set_value", { entity_id: volume, value: Number(v) }) : undefined))
+          .then(() => {
+            if (def && track) this._call("select", "select_option", { entity_id: track, option: def });
+            else this._call("select", "select_option", { entity_id: this._entity("lullaby"), option: "play" });
+          });
         break;
       }
       case "talk":
@@ -1178,6 +1182,7 @@ const SCHEMA = [
         name: "default_timer",
         selector: { select: { mode: "dropdown", options: [{ value: "", label: "The monitor's current timer" }, ...TIMERS.map((t) => ({ value: t, label: t }))] } },
       },
+      { name: "default_volume", selector: { number: { min: 1, max: 100, step: 1, mode: "slider", unit_of_measurement: "%" } } },
     ],
   },
   {
@@ -1221,6 +1226,7 @@ const EDITOR_LABELS = {
   night_light: "Night light",
   default_track: "Lullaby to play (empty = the monitor's current one)",
   default_timer: "Lullaby timer (empty = the monitor's current one)",
+  default_volume: "Lullaby volume (empty = the monitor's current one)",
   lullaby_timer: "Lullaby timer",
   overlay_bottom_left: "Bottom left",
   overlay_bottom_right: "Bottom right",
