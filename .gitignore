@@ -39,3 +39,6 @@ tools/go2rtc/
 # Card harness runtime (go2rtc config holds the RTSP credential)
 /tools/card-harness/work/
 __pycache__/
+
+# lanprobe diagnostic binary
+/bridge/lanprobe
