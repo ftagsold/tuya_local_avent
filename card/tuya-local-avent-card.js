@@ -48,7 +48,7 @@
  */
 
 const CARD = "tuya-local-avent-card";
-const VERSION = "1.8.1";
+const VERSION = "1.9.0";
 
 const ALL_CONTROLS = ["listen", "night_light", "lullaby", "talk", "fullscreen", "background"];
 // Controls that open a panel (toggle + slider); the rest act on tap.
@@ -88,8 +88,16 @@ const CORNERS = { overlay_bottom_left: "bottom-left", overlay_bottom_right: "bot
 const PENDING_MS = 5000;
 // Config defaults; the editor leaves keys at these values out of the YAML.
 const DEFAULTS = { talk_mode: "toggle", listen: false, listen_volume: 100, talk_volume: 100, autohide: 5 };
-// No decoded video frame for this long = dead stream: reconnect.
+// No decoded video frame for this long = dead stream: reconnect. Also
+// covers a start that never gets that far (a Home Assistant call that
+// never answers, ICE stuck in "checking").
 const STALL_MS = 15000;
+// Back on screen / online again / ICE "disconnected": a frame within this
+// long, else reconnect at once instead of after STALL_MS.
+const RECHECK_MS = 4000;
+// Retry delay after a failed or dead stream: doubles per failure up to the
+// cap, back to the first value once video plays.
+const RETRY_MS = [2000, 30000];
 const POSITIONS = {
   "top-left": "top:8px;left:8px;",
   "top-center": "top:8px;left:50%;transform:translateX(-50%);",
@@ -178,6 +186,16 @@ class TuyaLocalAventCard extends HTMLElement {
   constructor() {
     super();
     this._gen = 0; // bumped by _stopVideo, see _startVideo
+    this._retryMs = RETRY_MS[0];
+    // Home Assistant's websocket came back (HA restart, network change, app
+    // resumed): its WebRTC sessions died with the old socket, and the
+    // websocket library re-sent our offer subscription for a stale offer.
+    this._onReady = () => {
+      if (this._mjpeg || !this.isConnected) return;
+      console.info(CARD, "Home Assistant reconnected, restarting the stream");
+      this._restartVideo("Reconnecting…", 0);
+    };
+    this._onOnline = () => this._recheck();
     // Taps inside the card are handled by the video's click handler.
     this._onOutside = (e) => {
       if (!this._open || !this._els) return;
@@ -223,6 +241,8 @@ class TuyaLocalAventCard extends HTMLElement {
         this._els?.video.play?.()?.catch(() => {});
         if (this._listen) this._els?.audio.play().catch(() => {});
       }
+      // The stream may have died while hidden: make sure soon.
+      this._recheck();
     };
   }
 
@@ -275,6 +295,11 @@ class TuyaLocalAventCard extends HTMLElement {
   set hass(hass) {
     const first = !this._hass;
     this._hass = hass;
+    if (hass.connection !== this._conn) {
+      this._conn?.removeEventListener("ready", this._onReady);
+      this._conn = hass.connection;
+      if (this.isConnected) this._conn?.addEventListener("ready", this._onReady);
+    }
     if (!this._config) return;
     if (first || !this._built) this._render();
     else this._update();
@@ -288,6 +313,8 @@ class TuyaLocalAventCard extends HTMLElement {
     document.addEventListener("webkitfullscreenchange", this._onFullscreen);
     document.addEventListener("visibilitychange", this._onVisible);
     window.addEventListener("resize", this._onResize);
+    window.addEventListener("online", this._onOnline);
+    this._conn?.addEventListener("ready", this._onReady);
     if (this._mjpeg) this._reloadMjpeg();
     else if (this._hass && this._config && !this._pc) this._startVideo();
   }
@@ -300,6 +327,8 @@ class TuyaLocalAventCard extends HTMLElement {
     document.removeEventListener("visibilitychange", this._onVisible);
     document.removeEventListener("pointerdown", this._unlockListen, true);
     window.removeEventListener("resize", this._onResize);
+    window.removeEventListener("online", this._onOnline);
+    this._conn?.removeEventListener("ready", this._onReady);
     clearTimeout(this._hideTimer);
     this._stopTalk();
     this._stopVideo();
@@ -505,7 +534,7 @@ class TuyaLocalAventCard extends HTMLElement {
       <div class="video" id="video"><div class="stage">
         <video id="v" autoplay playsinline muted></video>
         <audio id="a" autoplay playsinline muted></audio>
-        <div class="status" id="status">Connecting…</div>
+        <div class="status" id="status" ${this._live || this._statusText === "" ? "hidden" : ""}>${esc(this._statusText ?? "Connecting…")}</div>
         <div class="hint" id="hint" hidden><ha-icon icon="mdi:volume-off"></ha-icon>Tap for sound</div>
         <div id="overlays"></div>
         <div class="group" id="group" ${c.controls.length ? "" : "hidden"}>
@@ -749,7 +778,7 @@ class TuyaLocalAventCard extends HTMLElement {
     } catch (e) {
       console.warn(CARD, "background listen", e);
       this._setStatus(`No HLS stream from Home Assistant: ${e.message || e.code || e}`);
-      setTimeout(() => this._pc?.connectionState === "connected" && this._setStatus(""), 5000);
+      setTimeout(() => this._live && this._setStatus(""), 5000);
     }
   }
 
@@ -911,6 +940,7 @@ class TuyaLocalAventCard extends HTMLElement {
   }
 
   _setStatus(text) {
+    this._statusText = text; // kept for a re-render
     if (!this._els) return;
     this._els.status.hidden = !text;
     this._els.status.textContent = text || "";
@@ -926,6 +956,9 @@ class TuyaLocalAventCard extends HTMLElement {
     // start still awaiting HA must not leave a connection behind.
     const gen = this._gen;
     const stale = () => gen !== this._gen || !this.isConnected;
+    // Watched from here on: a start hung on Home Assistant retries too.
+    this._watch();
+    if (!this._statusText) this._setStatus("Connecting…");
     try {
       const caps = await this._hass.callWS({ type: "camera/capabilities", entity_id }).catch(() => null);
       if (stale()) return;
@@ -959,10 +992,10 @@ class TuyaLocalAventCard extends HTMLElement {
           this._applyListen();
         }
       };
-      this._watch(pc);
       pc.onconnectionstatechange = () => {
         if (pc !== this._pc) return;
-        if (pc.connectionState === "connected") this._setStatus("");
+        // The status clears on the first decoded frame (see _watch).
+        if (pc.connectionState === "disconnected") this._recheck();
         if (["failed", "closed"].includes(pc.connectionState)) this._restartVideo("Connection lost, retrying…");
       };
       let sessionId = null;
@@ -985,23 +1018,31 @@ class TuyaLocalAventCard extends HTMLElement {
       const unsub = await this._hass.connection.subscribeMessage(
         async (msg) => {
           if (pc !== this._pc) return;
-          switch (msg.type) {
-            case "session":
-              sessionId = msg.session_id;
-              pending.splice(0).forEach(sendCandidate);
-              break;
-            case "answer":
-              await pc.setRemoteDescription({ type: "answer", sdp: msg.answer });
-              answered = true;
-              for (const c of remote.splice(0)) await pc.addIceCandidate(c).catch(() => {});
-              break;
-            case "candidate":
-              if (answered) await pc.addIceCandidate(msg.candidate).catch(() => {});
-              else remote.push(msg.candidate);
-              break;
-            case "error":
-              this._restartVideo(`Stream error: ${msg.message || msg.code}`);
-              break;
+          try {
+            switch (msg.type) {
+              case "session":
+                sessionId = msg.session_id;
+                pending.splice(0).forEach(sendCandidate);
+                break;
+              case "answer":
+                // A second answer = the subscription was re-sent after a
+                // websocket reconnect; _onReady restarts the stream.
+                if (pc.signalingState !== "have-local-offer") break;
+                await pc.setRemoteDescription({ type: "answer", sdp: msg.answer });
+                answered = true;
+                for (const c of remote.splice(0)) await pc.addIceCandidate(c).catch(() => {});
+                break;
+              case "candidate":
+                if (answered) await pc.addIceCandidate(msg.candidate).catch(() => {});
+                else remote.push(msg.candidate);
+                break;
+              case "error":
+                this._restartVideo(`Stream error: ${msg.message || msg.code}`);
+                break;
+            }
+          } catch (e) {
+            console.warn(CARD, "webrtc", msg.type, e);
+            if (pc === this._pc) this._restartVideo(`Stream error: ${e.message || e}`);
           }
         },
         { type: "camera/webrtc/offer", entity_id, offer: offer.sdp },
@@ -1014,7 +1055,8 @@ class TuyaLocalAventCard extends HTMLElement {
       console.warn(CARD, "webrtc", e);
       this._restartVideo(`Cannot start the stream: ${e.message || e.code || e}`);
     } finally {
-      this._starting = false;
+      // A stop meanwhile already reset it, maybe for a newer start.
+      if (gen === this._gen) this._starting = false;
       // Re-attached while this start was in flight: that connect was
       // refused by `_starting`, so start again for the current generation.
       if (stale() && this.isConnected && !this._pc && !this._retry && !this._mjpeg) this._startVideo();
@@ -1023,33 +1065,48 @@ class TuyaLocalAventCard extends HTMLElement {
 
   // Restart a connection whose video stopped decoding (connection state
   // can stay "connected" while no media flows, e.g. after the source
-  // restarted or the app was backgrounded). Paused while the page is hidden.
-  _watch(pc) {
-    let frames = -1;
-    let since = Date.now();
+  // restarted or the app was backgrounded), or that never got a frame.
+  // Paused while the page is hidden. The first frame clears the status.
+  _watch() {
+    const wd = { frames: 0, since: Date.now() };
+    this._wd = wd;
     clearInterval(this._watchTimer);
     this._watchTimer = setInterval(async () => {
       if (document.hidden) {
-        since = Date.now();
+        wd.since = Date.now();
         return;
       }
-      const stats = await pc.getStats().catch(() => null);
-      if (pc !== this._pc || !stats) return;
+      const pc = this._pc;
+      const stats = pc && (await pc.getStats().catch(() => null));
+      if (wd !== this._wd) return;
       let n = 0;
-      stats.forEach((r) => {
+      stats?.forEach((r) => {
         if (r.type === "inbound-rtp" && r.kind === "video") n = r.framesDecoded ?? 0;
       });
-      if (n !== frames) {
-        frames = n;
-        since = Date.now();
-      } else if (Date.now() - since > STALL_MS) {
+      if (n > wd.frames) {
+        wd.frames = n;
+        wd.since = Date.now();
+        if (!this._live) {
+          this._live = true;
+          this._retryMs = RETRY_MS[0];
+          this._setStatus("");
+        }
+      } else if (Date.now() - wd.since > STALL_MS) {
         console.warn(CARD, `no video frame for ${STALL_MS / 1000} s, reconnecting`);
-        this._restartVideo("Stream stalled, reconnecting…");
+        this._restartVideo(this._live ? "Stream stalled, reconnecting…" : "Stream did not start, retrying…");
       }
-    }, 3000);
+    }, 1000);
+  }
+
+  // Expect a new frame within RECHECK_MS, else reconnect.
+  _recheck() {
+    if (this._wd) this._wd.since = Math.min(this._wd.since, Date.now() - STALL_MS + RECHECK_MS);
+    else if (this.isConnected && this._hass && this._config && !this._retry && !this._mjpeg) this._startVideo();
   }
 
   _startMjpeg(note) {
+    clearInterval(this._watchTimer); // no WebRTC frames to count
+    this._wd = null;
     if (!this._els) return;
     this._mjpeg = true;
     this._showMjpeg();
@@ -1081,22 +1138,30 @@ class TuyaLocalAventCard extends HTMLElement {
     img.src = `/api/camera_proxy_stream/${encodeURIComponent(this._config.camera)}?${q}`;
   }
 
-  _restartVideo(msg) {
+  _restartVideo(msg, delay) {
     this._stopTalk();
     this._stopVideo();
     this._setStatus(msg);
     if (!this.isConnected) return;
+    if (delay === undefined) {
+      delay = this._retryMs;
+      this._retryMs = Math.min(this._retryMs * 2, RETRY_MS[1]);
+    }
+    console.info(CARD, `${msg} (retry in ${delay / 1000} s)`);
     this._retry = setTimeout(() => {
       this._retry = null;
       this._startVideo();
-    }, 5000);
+    }, delay);
   }
 
   _stopVideo() {
     this._gen = (this._gen ?? 0) + 1;
     clearTimeout(this._retry);
     clearInterval(this._watchTimer);
+    this._wd = null;
     this._retry = null;
+    this._starting = false;
+    this._live = false;
     if (this._unsub) {
       this._unsub().catch?.(() => {});
       this._unsub = null;
@@ -1136,7 +1201,7 @@ class TuyaLocalAventCard extends HTMLElement {
       console.warn(CARD, "talk", e);
       this._stopTalk();
       this._setStatus(`Microphone unavailable: ${e.message || e}`);
-      setTimeout(() => this._pc?.connectionState === "connected" && this._setStatus(""), 4000);
+      setTimeout(() => this._live && this._setStatus(""), 4000);
     }
   }
 
