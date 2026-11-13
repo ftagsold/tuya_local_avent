@@ -63,6 +63,9 @@ pub struct Env {
     pub rtsp_pass: String,
     pub overlay_font: String,
     pub ffmpeg: String,
+    /// `auto` (VAAPI when it works, else libx264), `vaapi` or `off`.
+    pub hwaccel: String,
+    pub vaapi_device: String,
 }
 
 impl Env {
@@ -107,7 +110,12 @@ impl Env {
             onvif_mac: get("ONVIF_MAC"),
             overlay_font: or("AVENT_OVERLAY_FONT", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
             ffmpeg: or("AVENT_FFMPEG", "ffmpeg"),
+            hwaccel: or("AVENT_HWACCEL", "auto").to_ascii_lowercase(),
+            vaapi_device: or("AVENT_VAAPI_DEVICE", "/dev/dri/renderD128"),
         };
+        if !matches!(env.hwaccel.as_str(), "auto" | "vaapi" | "off") {
+            bail!("AVENT_HWACCEL must be auto, vaapi or off");
+        }
         // A guessable stream password is an open stream of a child's room.
         for (k, v) in [("ONVIF_PASS", &env.onvif_pass), ("RTSP_PASS", &env.rtsp_pass)] {
             if v.len() < 8 || v.eq_ignore_ascii_case("changeme") {
@@ -324,6 +332,16 @@ pub async fn run(env: Env) -> Result<()> {
             env.overlay_font
         );
     }
+    let encoder = if env.hwaccel != "off" && media::vaapi_supported(&env.ffmpeg, &env.vaapi_device) {
+        media::Encoder::Vaapi(env.vaapi_device.clone())
+    } else {
+        media::Encoder::X264
+    };
+    match (&encoder, env.hwaccel.as_str()) {
+        (media::Encoder::Vaapi(d), _) => tracing::info!("relay encodes H.264 on the GPU (VAAPI {d})"),
+        (_, "vaapi") => tracing::error!("AVENT_HWACCEL=vaapi but VAAPI does not work: encoding with libx264"),
+        _ => tracing::info!("relay encodes H.264 with libx264"),
+    }
     let relay_health = std::sync::Arc::new(media::Health::default());
     if let Some(ip) = gate_ip {
         let health = relay_health.clone();
@@ -350,6 +368,7 @@ pub async fn run(env: Env) -> Result<()> {
                 clock: &overlay_path,
                 temperature: &temperature_path,
             }),
+            &encoder,
         ),
         // ffmpeg's own -timeout catches a dead input; this catches the rest
         // (input alive but no decodable frames, or a blocked output).

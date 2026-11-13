@@ -30,6 +30,10 @@ services:
         # ONVIF_MAC). Protect keys cameras by MAC. Compose >= 2.23; older:
         # service-level mac_address.
         mac_address: 02:00:00:00:00:00
+    # GPU H.264 encode (AMD/Intel VAAPI): ~1/4 of the CPU of libx264.
+    # Without it the relay falls back to libx264 (AVENT_HWACCEL).
+    devices:
+      - /dev/dri/renderD128:/dev/dri/renderD128
     volumes:
       - ./data:/data               # bridge.json, cloud.json cache, go2rtc.yaml (all 0600)
     environment:

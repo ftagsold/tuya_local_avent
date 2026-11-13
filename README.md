@@ -148,6 +148,8 @@ Optional:
 | `RTSP_USER` / `RTSP_PASS` | `ONVIF_USER` / `ONVIF_PASS` |
 | `RTSP_PORT` | `8554` (TCP) |
 | `TZ` | UTC (overlay clock timezone, e.g. `Europe/Berlin`) |
+| `AVENT_HWACCEL` | `auto`: GPU H.264 encode (VAAPI) when a test encode works, else libx264; `vaapi` logs an error on fallback; `off` |
+| `AVENT_VAAPI_DEVICE` | `/dev/dri/renderD128` (pass it in: `devices: [/dev/dri/renderD128]`) |
 | `AVENT_OVERLAY_FONT` | `/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf` |
 | `AVENT_DATA` | `/data` |
 | `RUST_LOG` | `info` |

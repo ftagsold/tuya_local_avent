@@ -56,9 +56,19 @@ LABEL org.opencontainers.image.source="https://github.com/ftagsold/tuya_local_av
       org.opencontainers.image.description="Local bridge: Philips Avent (Tuya) baby monitor to Home Assistant and UniFi Protect" \
       org.opencontainers.image.licenses="MIT"
 # ffmpeg (with drawtext/libfreetype), the overlay font, tzdata for the clock.
-RUN apt-get update \
- && apt-get install -y --no-install-recommends ffmpeg ca-certificates fonts-dejavu-core tzdata \
- && rm -rf /var/lib/apt/lists/*
+# amd64: Mesa's VAAPI driver for GPU H.264 encode (AVENT_HWACCEL), from
+# backports: bookworm's Mesa 22.3 predates the Radeon 780M (Ryzen 7040).
+ARG TARGETARCH
+RUN set -eu; \
+    if [ "$TARGETARCH" = amd64 ]; then \
+      echo "deb http://deb.debian.org/debian bookworm-backports main" > /etc/apt/sources.list.d/backports.list; \
+    fi; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ffmpeg ca-certificates fonts-dejavu-core tzdata; \
+    if [ "$TARGETARCH" = amd64 ]; then \
+      apt-get install -y --no-install-recommends -t bookworm-backports mesa-va-drivers; \
+    fi; \
+    rm -rf /var/lib/apt/lists/*
 COPY --from=gobridge /out/avent-webrtc-bridge /app/avent-webrtc-bridge
 COPY --from=rustbuild /out/tuya_local_avent /app/tuya_local_avent
 COPY --from=go2rtc /usr/local/bin/go2rtc /app/go2rtc

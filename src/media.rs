@@ -175,31 +175,50 @@ pub struct Overlay<'a> {
 ///   Multi-slice frames and out-of-band-only SPS/PPS break Protect and VLC.
 /// - `-timeout`: a silent input (bridge stalled) ends ffmpeg instead of
 ///   hanging; `-progress pipe:1` feeds the stall watchdog in `supervise`.
-pub fn relay_args(input: &str, output: &str, overlay: Option<Overlay>) -> Vec<String> {
-    let mut a: Vec<String> = [
+/// - VAAPI: decode and overlay stay on the CPU, the GPU encodes (~1/4 of
+///   the CPU of libx264). h264_vaapi writes one slice per frame and SPS/PPS
+///   before every IDR on its own.
+pub fn relay_args(input: &str, output: &str, overlay: Option<Overlay>, encoder: &Encoder) -> Vec<String> {
+    let mut a: Vec<String> = Vec::new();
+    if let Encoder::Vaapi(device) = encoder {
+        a.extend(["-vaapi_device".to_string(), device.clone()]);
+    }
+    a.extend([
         "-hide_banner", "-loglevel", "warning", "-nostdin", "-nostats", "-progress", "pipe:1",
         "-rtsp_transport", "tcp", "-timeout", "10000000", "-i", input,
         "-map", "0:v:0", "-map", "0:a:0?", "-map", "0:a:0?",
     ]
     .iter()
-    .map(|s| s.to_string())
-    .collect();
+    .map(|s| s.to_string()));
     let mut vf = String::from("fps=25");
     if let Some(o) = overlay {
         let style = format!("fontfile={}:y=10:fontsize=24:fontcolor=white", o.font);
         vf.push_str(&format!(",drawtext={style}:textfile={}:expansion=normal:x=10", o.clock.display()));
         vf.push_str(&format!(",drawtext={style}:textfile={}:reload=1:expansion=none:x=w-tw-10", o.temperature.display()));
     }
-    a.push("-vf".into());
-    a.push(vf);
-    a.extend(
-        [
-            // 4 threads: plenty for 720p25 veryfast; x264's default (1.5x
-            // cores) multiplies frame buffers and latency for nothing.
-            "-c:v", "libx264", "-preset", "veryfast", "-threads", "4", "-profile:v", "main", "-pix_fmt", "yuv420p",
+    let video: &[&str] = match encoder {
+        Encoder::Vaapi(_) => {
+            vf.push_str(",format=nv12,hwupload");
+            &[
+                "-c:v", "h264_vaapi", "-profile:v", "main", "-bf", "0", "-g", "50",
+                "-rc_mode", "VBR", "-b:v", "2000k", "-maxrate", "2500k", "-bufsize", "5000k",
+            ]
+        }
+        // superfast: ~25% less CPU than veryfast at 720p25. 4 threads:
+        // plenty; x264's default (1.5x cores) multiplies frame buffers and
+        // latency for nothing.
+        Encoder::X264 => &[
+            "-c:v", "libx264", "-preset", "superfast", "-threads", "4", "-profile:v", "main", "-pix_fmt", "yuv420p",
             "-bf", "0", "-g", "50", "-keyint_min", "50", "-sc_threshold", "0",
             "-x264-params", "sliced-threads=0:slices=1:repeat-headers=1:rc-lookahead=0:sync-lookahead=0",
             "-maxrate", "2500k", "-bufsize", "5000k",
+        ],
+    };
+    a.push("-vf".into());
+    a.push(vf);
+    a.extend(video.iter().map(|s| s.to_string()));
+    a.extend(
+        [
             "-c:a:0", "aac", "-profile:a:0", "aac_low", "-b:a:0", "64k",
             "-c:a:1", "libopus", "-b:a:1", "32k", "-application:a:1", "lowdelay",
             "-ar", "48000", "-ac", "1",
@@ -210,6 +229,43 @@ pub fn relay_args(input: &str, output: &str, overlay: Option<Overlay>) -> Vec<St
         .map(|s| s.to_string()),
     );
     a
+}
+
+/// The relay's H.264 encoder.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Encoder {
+    X264,
+    /// GPU encode through this VAAPI render node.
+    Vaapi(String),
+}
+
+/// Whether ffmpeg can H.264-encode on the VAAPI `device`: a short test
+/// encode, so a missing node, driver or encode support all read as no.
+/// Logs why not.
+pub fn vaapi_supported(ffmpeg: &str, device: &str) -> bool {
+    if !Path::new(device).exists() {
+        tracing::info!("no VAAPI device {device}");
+        return false;
+    }
+    let out = std::process::Command::new(ffmpeg)
+        .args([
+            "-hide_banner", "-v", "error", "-nostdin", "-vaapi_device", device,
+            "-f", "lavfi", "-i", "color=s=1280x720:r=25", "-frames:v", "5",
+            "-vf", "format=nv12,hwupload", "-c:v", "h264_vaapi", "-f", "null", "-",
+        ])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => true,
+        Ok(o) => {
+            let err = String::from_utf8_lossy(&o.stderr);
+            tracing::info!("VAAPI test encode on {device} failed: {}", err.lines().next().unwrap_or("").trim());
+            false
+        }
+        Err(e) => {
+            tracing::info!("VAAPI test encode: {e}");
+            false
+        }
+    }
 }
 
 /// Whether ffmpeg has the drawtext filter and the font exists.
@@ -451,11 +507,23 @@ mod tests {
     #[test]
     fn temperature_is_drawn_top_right_and_reloaded() {
         let (clock, temp) = (Path::new("/d/overlay.txt"), Path::new("/d/temperature.txt"));
-        let a = relay_args("in", "out", Some(Overlay { font: "/f.ttf", clock, temperature: temp }));
+        let a = relay_args("in", "out", Some(Overlay { font: "/f.ttf", clock, temperature: temp }), &Encoder::X264);
         let vf = &a[a.iter().position(|x| x == "-vf").unwrap() + 1];
         assert!(vf.contains("textfile=/d/overlay.txt:expansion=normal:x=10"));
         assert!(vf.contains("textfile=/d/temperature.txt:reload=1:expansion=none:x=w-tw-10"));
         assert_eq!(temperature_text(2150.0), "21.5 °C");
+    }
+
+    #[test]
+    fn vaapi_uploads_after_overlay() {
+        let a = relay_args("in", "out", None, &Encoder::Vaapi("/dev/dri/renderD128".into()));
+        assert_eq!(a[..2], ["-vaapi_device", "/dev/dri/renderD128"]);
+        let vf = &a[a.iter().position(|x| x == "-vf").unwrap() + 1];
+        assert!(vf.ends_with(",format=nv12,hwupload"));
+        assert!(a.iter().any(|x| x == "h264_vaapi"));
+        assert!(!a.iter().any(|x| x == "libx264"));
+        let x = relay_args("in", "out", None, &Encoder::X264);
+        assert!(!x.iter().any(|x| x.contains("vaapi")));
     }
 
     #[test]
