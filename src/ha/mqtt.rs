@@ -269,6 +269,7 @@ async fn handle_command(cfg: &Config, control: &Control, block: &Arc<AtomicU32>,
     if !d.writable {
         return Ok(());
     }
+    tracing::info!("HA command {slug} = {value}");
     let raw: Value = match d.kind {
         Kind::Switch | Kind::Light => json!(value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("on")),
         Kind::Number => {
