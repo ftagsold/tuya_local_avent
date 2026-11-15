@@ -48,7 +48,7 @@
  */
 
 const CARD = "tuya-local-avent-card";
-const VERSION = "1.9.0";
+const VERSION = "1.10.0";
 
 const ALL_CONTROLS = ["listen", "night_light", "lullaby", "talk", "fullscreen", "background"];
 // Controls that open a panel (toggle + slider); the rest act on tap.
@@ -95,6 +95,11 @@ const STALL_MS = 15000;
 // Back on screen / online again / ICE "disconnected": a frame within this
 // long, else reconnect at once instead of after STALL_MS.
 const RECHECK_MS = 4000;
+// Offer sent, no answer for this long: retry. Home Assistant acks the offer
+// subscription, then an internal error (e.g. its go2rtc refusing to add the
+// stream, first try after every HA restart) arrives as a late error result
+// the websocket library drops: no event ever comes.
+const ANSWER_MS = 6000;
 // Retry delay after a failed or dead stream: doubles per failure up to the
 // cap, back to the first value once video plays.
 const RETRY_MS = [2000, 30000];
@@ -1028,6 +1033,7 @@ class TuyaLocalAventCard extends HTMLElement {
                 // A second answer = the subscription was re-sent after a
                 // websocket reconnect; _onReady restarts the stream.
                 if (pc.signalingState !== "have-local-offer") break;
+                clearTimeout(this._answerTimer);
                 await pc.setRemoteDescription({ type: "answer", sdp: msg.answer });
                 answered = true;
                 for (const c of remote.splice(0)) await pc.addIceCandidate(c).catch(() => {});
@@ -1049,7 +1055,15 @@ class TuyaLocalAventCard extends HTMLElement {
       );
       // Ends HA's WebRTC session; drop it at once if stopped meanwhile.
       if (pc !== this._pc) unsub().catch?.(() => {});
-      else this._unsub = unsub;
+      else {
+        this._unsub = unsub;
+        clearTimeout(this._answerTimer);
+        this._answerTimer = setTimeout(() => {
+          if (pc !== this._pc || answered) return;
+          console.warn(CARD, `no WebRTC answer from Home Assistant in ${ANSWER_MS / 1000} s, retrying`);
+          this._restartVideo("No answer from Home Assistant, retrying…");
+        }, ANSWER_MS);
+      }
       this._update();
     } catch (e) {
       console.warn(CARD, "webrtc", e);
@@ -1157,6 +1171,7 @@ class TuyaLocalAventCard extends HTMLElement {
   _stopVideo() {
     this._gen = (this._gen ?? 0) + 1;
     clearTimeout(this._retry);
+    clearTimeout(this._answerTimer);
     clearInterval(this._watchTimer);
     this._wd = null;
     this._retry = null;
