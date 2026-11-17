@@ -17,7 +17,8 @@
  *   night light, lullaby, lullaby track, lullaby playing and volume are the
  *   bridge's MQTT entities, found on the camera's device unless set
  *   explicitly. The lullaby panel also picks the track and the auto-stop
- *   timer; play first sets `default_timer` and `default_volume`, then starts
+ *   timer; play first sets `default_timer` and `default_volume` (unless a
+ *   volume was picked while stopped), then starts
  *   `default_track` (or resumes the monitor's current track).
  * - Sliders: drawn by the card (pointer events), not <input type=range>:
  *   they follow the turned landscape stage and hold a sent value until the
@@ -48,7 +49,7 @@
  */
 
 const CARD = "tuya-local-avent-card";
-const VERSION = "1.11.0";
+const VERSION = "1.12.0";
 
 const ALL_CONTROLS = ["listen", "night_light", "lullaby", "talk", "fullscreen", "background"];
 // Controls that open a panel (toggle + slider); the rest act on tap.
@@ -86,8 +87,6 @@ const CORNERS = { overlay_bottom_left: "bottom-left", overlay_bottom_right: "bot
 // A slider value sent to an entity wins over its state for this long, or
 // until the state matches.
 const PENDING_MS = 5000;
-// Lowest usable lullaby volume (see _volumeRange).
-const VOLUME_MIN = 30;
 // Config defaults; the editor leaves keys at these values out of the YAML.
 const DEFAULTS = { talk_mode: "toggle", listen: false, listen_volume: 100, talk_volume: 100, autohide: 5 };
 // No decoded video frame for this long = dead stream: reconnect. Also
@@ -282,7 +281,7 @@ class TuyaLocalAventCard extends HTMLElement {
     range("listen_volume", 0, 100);
     range("talk_volume", 0, 200);
     range("autohide", 0, 3600);
-    range("default_volume", 1, 100);
+    range("default_volume", 0, 100);
     const restart = this._config && this._config.camera !== config.camera;
     this._autoReg = null; // entity overrides / camera may have changed
     this._config = { ...DEFAULTS, ...config, controls, overlays };
@@ -399,13 +398,14 @@ class TuyaLocalAventCard extends HTMLElement {
     return LIGHT_LEVELS.reduce((a, b) => (Math.abs(b - pct) < Math.abs(a - pct) ? b : a));
   }
 
-  // The lullaby volume entity's range. The monitor plays below 30 % near
-  // silent (and jumps to 70 % on such a write during play), so 30 is the
-  // floor even when the entity still advertises an older minimum of 1.
+  // The lullaby volume entity's range. The bridge maps 0-100 onto the
+  // monitor's usable 30-100. An older bridge passes the raw value through
+  // (minimum 1): the monitor plays below 30 near silent, so 30 is the floor.
   _volumeRange() {
     const vol = this._state(this._entity("volume"));
+    const min = Number(vol?.attributes.min ?? 0);
     const max = Number(vol?.attributes.max ?? 100);
-    return { min: Math.min(max, Math.max(VOLUME_MIN, Number(vol?.attributes.min ?? VOLUME_MIN))), max };
+    return { min: min > 0 ? Math.min(max, Math.max(30, min)) : min, max };
   }
 
   _model(key) {
@@ -446,7 +446,6 @@ class TuyaLocalAventCard extends HTMLElement {
                 min,
                 max,
                 step: Number(vol.attributes.step ?? 1),
-                // A value stored before the 30 % floor would put the thumb off the rail.
                 value: Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : min,
                 text: Number.isFinite(n) ? `${Math.round(n)}%` : "—",
               },
@@ -488,11 +487,12 @@ class TuyaLocalAventCard extends HTMLElement {
         const track = this._entity("lullaby_track");
         const volume = this._entity("volume");
         const { default_timer: t, default_track: def, default_volume: dv } = this._config;
-        // An older config may hold a default below the usable range.
+        // A volume picked while stopped wins over the default for this play.
         const { min, max } = this._volumeRange();
-        const v = dv ? Math.min(max, Math.max(min, Number(dv))) : undefined;
+        const v = this._volumePicked || dv === undefined || dv === null || dv === "" ? undefined : Math.min(max, Math.max(min, Number(dv)));
+        this._volumePicked = false;
         (t && timer ? this._call("select", "select_option", { entity_id: timer, option: t }) : Promise.resolve())
-          .then(() => (v && volume ? this._call("number", "set_value", { entity_id: volume, value: v }) : undefined))
+          .then(() => (v !== undefined && volume ? this._call("number", "set_value", { entity_id: volume, value: v }) : undefined))
           .then(() => {
             if (def && track) this._call("select", "select_option", { entity_id: track, option: def });
             else this._call("select", "select_option", { entity_id: this._entity("lullaby"), option: "play" });
@@ -518,7 +518,9 @@ class TuyaLocalAventCard extends HTMLElement {
         if (final) this._call("light", "turn_on", { entity_id: this._entity("night_light"), brightness_pct: LIGHT_LEVELS[value - 1] });
         break;
       case "lullaby":
-        if (final) this._call("number", "set_value", { entity_id: this._entity("volume"), value });
+        if (!final) break;
+        this._call("number", "set_value", { entity_id: this._entity("volume"), value });
+        this._volumePicked = !this._model("lullaby").on;
         break;
       case "talk":
         this._talkGain = value / 100;
@@ -1282,7 +1284,7 @@ const SCHEMA = [
         name: "default_timer",
         selector: { select: { mode: "dropdown", options: [{ value: "", label: "The monitor's current timer" }, ...TIMERS.map((t) => ({ value: t, label: t }))] } },
       },
-      { name: "default_volume", selector: { number: { min: VOLUME_MIN, max: 100, step: 1, mode: "slider", unit_of_measurement: "%" } } },
+      { name: "default_volume", selector: { number: { min: 0, max: 100, step: 1, mode: "slider", unit_of_measurement: "%" } } },
     ],
   },
   {
@@ -1326,7 +1328,7 @@ const EDITOR_LABELS = {
   night_light: "Night light",
   default_track: "Lullaby to play (empty = the monitor's current one)",
   default_timer: "Lullaby timer (empty = the monitor's current one)",
-  default_volume: "Lullaby volume, 30-100 % (empty = the monitor's current one)",
+  default_volume: "Lullaby volume (empty = the monitor's current one)",
   lullaby_timer: "Lullaby timer",
   overlay_bottom_left: "Bottom left",
   overlay_bottom_right: "Bottom right",

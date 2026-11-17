@@ -246,7 +246,8 @@ plain `docker run`, pass `--log-opt max-size=10m --log-opt max-file=3`.
   or talk is on. Tapping a button turns the group into that control: an
   on/off toggle on the left and its slider (listen volume, night light
   33/66/100 %, lullaby volume, talk volume); the lullaby control also has a
-  track picker. Lullaby play sets `default_volume` (when set), then starts
+  track picker. Lullaby play sets `default_volume` (when set, and no
+  volume was picked while stopped), then starts
   `default_track`, or resumes the monitor's current track when unset. Sliders are drawn by the card
   (pointer events), so they work in the turned landscape view and on touch
   screens, and keep a sent value until the entity reports it. A tap on the video (or Esc)
@@ -305,7 +306,7 @@ talk_volume: 100             # default talk gain, 0-200 %
 autohide: 5                  # hide controls after N s; 0 = always shown
 default_track: Brahms' Lullaby   # lullaby play starts this; unset = current track
 default_timer: 30 min        # set before play: 5|10|20|30|60|90 min, Forever
-default_volume: 40           # lullaby volume set before play, 30-100 %; unset = current
+default_volume: 40           # lullaby volume set before play, 0-100 %; unset = current
 overlay_bottom_left: binary_sensor.nursery_motion   # corner overlays (editor pickers)
 # overlay_bottom_right: ...
 # night_light: light.nursery_night_light   # optional overrides
