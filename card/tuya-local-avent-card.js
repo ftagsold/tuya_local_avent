@@ -48,7 +48,7 @@
  */
 
 const CARD = "tuya-local-avent-card";
-const VERSION = "1.10.0";
+const VERSION = "1.11.0";
 
 const ALL_CONTROLS = ["listen", "night_light", "lullaby", "talk", "fullscreen", "background"];
 // Controls that open a panel (toggle + slider); the rest act on tap.
@@ -86,6 +86,8 @@ const CORNERS = { overlay_bottom_left: "bottom-left", overlay_bottom_right: "bot
 // A slider value sent to an entity wins over its state for this long, or
 // until the state matches.
 const PENDING_MS = 5000;
+// Lowest usable lullaby volume (see _volumeRange).
+const VOLUME_MIN = 30;
 // Config defaults; the editor leaves keys at these values out of the YAML.
 const DEFAULTS = { talk_mode: "toggle", listen: false, listen_volume: 100, talk_volume: 100, autohide: 5 };
 // No decoded video frame for this long = dead stream: reconnect. Also
@@ -397,6 +399,15 @@ class TuyaLocalAventCard extends HTMLElement {
     return LIGHT_LEVELS.reduce((a, b) => (Math.abs(b - pct) < Math.abs(a - pct) ? b : a));
   }
 
+  // The lullaby volume entity's range. The monitor plays below 30 % near
+  // silent (and jumps to 70 % on such a write during play), so 30 is the
+  // floor even when the entity still advertises an older minimum of 1.
+  _volumeRange() {
+    const vol = this._state(this._entity("volume"));
+    const max = Number(vol?.attributes.max ?? 100);
+    return { min: Math.min(max, Math.max(VOLUME_MIN, Number(vol?.attributes.min ?? VOLUME_MIN))), max };
+  }
+
   _model(key) {
     const unavailable = (st) => !st || st.state === "unavailable" || st.state === "unknown";
     switch (key) {
@@ -425,14 +436,20 @@ class TuyaLocalAventCard extends HTMLElement {
         const playing = this._state(this._entity("lullaby_playing"));
         const vol = this._state(this._entity("volume"));
         const n = Number(vol?.state);
-        const min = Number(vol?.attributes.min ?? 1);
-        const max = Number(vol?.attributes.max ?? 100);
+        const { min, max } = this._volumeRange();
         return {
           on: playing && !unavailable(playing) ? playing.state === "on" : st?.state === "play",
           disabled: gone(st),
           slider: gone(vol)
             ? { disabled: true, min: 0, max: 100, step: 1, value: 0, text: "—" }
-            : { min, max, step: Number(vol.attributes.step ?? 1), value: Number.isFinite(n) ? n : min, text: Number.isFinite(n) ? `${Math.round(n)}%` : "—" },
+            : {
+                min,
+                max,
+                step: Number(vol.attributes.step ?? 1),
+                // A value stored before the 30 % floor would put the thumb off the rail.
+                value: Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : min,
+                text: Number.isFinite(n) ? `${Math.round(n)}%` : "—",
+              },
         };
       }
       case "talk": {
@@ -470,9 +487,12 @@ class TuyaLocalAventCard extends HTMLElement {
         const timer = this._entity("lullaby_timer");
         const track = this._entity("lullaby_track");
         const volume = this._entity("volume");
-        const { default_timer: t, default_track: def, default_volume: v } = this._config;
+        const { default_timer: t, default_track: def, default_volume: dv } = this._config;
+        // An older config may hold a default below the usable range.
+        const { min, max } = this._volumeRange();
+        const v = dv ? Math.min(max, Math.max(min, Number(dv))) : undefined;
         (t && timer ? this._call("select", "select_option", { entity_id: timer, option: t }) : Promise.resolve())
-          .then(() => (v && volume ? this._call("number", "set_value", { entity_id: volume, value: Number(v) }) : undefined))
+          .then(() => (v && volume ? this._call("number", "set_value", { entity_id: volume, value: v }) : undefined))
           .then(() => {
             if (def && track) this._call("select", "select_option", { entity_id: track, option: def });
             else this._call("select", "select_option", { entity_id: this._entity("lullaby"), option: "play" });
@@ -1262,7 +1282,7 @@ const SCHEMA = [
         name: "default_timer",
         selector: { select: { mode: "dropdown", options: [{ value: "", label: "The monitor's current timer" }, ...TIMERS.map((t) => ({ value: t, label: t }))] } },
       },
-      { name: "default_volume", selector: { number: { min: 1, max: 100, step: 1, mode: "slider", unit_of_measurement: "%" } } },
+      { name: "default_volume", selector: { number: { min: VOLUME_MIN, max: 100, step: 1, mode: "slider", unit_of_measurement: "%" } } },
     ],
   },
   {
@@ -1306,7 +1326,7 @@ const EDITOR_LABELS = {
   night_light: "Night light",
   default_track: "Lullaby to play (empty = the monitor's current one)",
   default_timer: "Lullaby timer (empty = the monitor's current one)",
-  default_volume: "Lullaby volume (empty = the monitor's current one)",
+  default_volume: "Lullaby volume, 30-100 % (empty = the monitor's current one)",
   lullaby_timer: "Lullaby timer",
   overlay_bottom_left: "Bottom left",
   overlay_bottom_right: "Bottom right",

@@ -56,6 +56,7 @@ pub async fn run(cfg: Config, control: Control) -> Result<()> {
     let state_client = client.clone();
     let dev = cfg.device_id.clone();
     let seen_block = block.clone();
+    let raise = control.clone();
     tokio::spawn(async move {
         // Timer state arrives as two DPs: switch (243) and length (244).
         let (mut timer_on, mut timer_secs) = (None::<bool>, None::<i64>);
@@ -98,6 +99,15 @@ pub async fn run(cfg: Config, control: Control) -> Result<()> {
                     let _ = state_client.publish(topic, QoS::AtLeastOnce, true, o).await;
                 }
                 continue;
+            }
+            // A volume below the usable floor (set by the app, or by an
+            // older bridge) makes the next play near silent, the monitor's
+            // own button included: raise it to the floor.
+            if u.id == dp::VOLUME && u.value.as_i64().is_some_and(|v| v < dp::VOLUME_MIN) {
+                tracing::info!("lullaby volume {} is below {}: raising it", u.value, dp::VOLUME_MIN);
+                if let Err(e) = write_one(&raise, dp::VOLUME, json!(dp::VOLUME_MIN)).await {
+                    tracing::warn!("raise lullaby volume: {e:#}");
+                }
             }
             if let Some(d) = dp::by_id(u.id) {
                 let topic = format!("{}/{}/state", base(&dev), d.slug);

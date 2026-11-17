@@ -50,7 +50,7 @@ pub static DPS: &[Dp] = &[
     Dp { options: TIMER_OPTIONS, ..dp(244, "lullaby_timer", "Lullaby Timer", Kind::Timer) },
     Dp { device_class: "running", on_value: "playing", writable: false, ..dp(246, "lullaby_playing", "Lullaby Playing", Kind::BinarySensor) },
     Dp { options: &["loop", "loop1", "shuffle"], ..dp(203, "play_mode", "Play Mode", Kind::Select) },
-    Dp { min: 1.0, max: 100.0, unit: "%", ..dp(209, "volume", "Volume", Kind::Number) },
+    Dp { min: VOLUME_MIN as f64, max: 100.0, unit: "%", ..dp(VOLUME, "volume", "Volume", Kind::Number) },
     Dp { scale: 100.0, unit: "°C", device_class: "temperature", writable: false, ..dp(207, "temperature", "Temperature", Kind::Sensor) },
     dp(134, "motion_switch", "Motion Alert", Kind::Switch),
     dp(139, "sound_switch", "Sound Alert", Kind::Switch),
@@ -67,6 +67,12 @@ pub const PLAY_CONTROL: u32 = 201;
 /// Temperature, °C x 100 (also burnt into the video).
 pub const TEMPERATURE: u32 = 207;
 pub const PLAY_TRACK: u32 = 202;
+/// Lullaby volume, 1-100 on the wire, but only 30-100 is usable (measured
+/// on the monitor, 2026-11-17): while a track plays, a write below 30 is
+/// replaced by 70 (audibly louder); while stopped it is stored, and the
+/// next play (app, card or the monitor's own button) is near silent.
+pub const VOLUME: u32 = 209;
+pub const VOLUME_MIN: i64 = 30;
 
 /// The built-in tracks, in id order (also the order `next` steps through
 /// them). From aventproxy's `LULLABY_CATALOGUE`.
