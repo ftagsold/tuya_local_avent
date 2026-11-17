@@ -12,7 +12,10 @@
 //! - answers a viewer it holds back `503 Service Unavailable` (with its CSeq
 //!   and Retry-After), the RTSP way of saying "try again shortly";
 //! - cuts every session through it when video stops or the relay restarts,
-//!   so viewers reconnect to the live publisher instead of freezing.
+//!   so viewers reconnect to the live publisher instead of freezing;
+//! - cuts a viewer that stops reading. Protect can wedge a session: TCP stays
+//!   up (zero window), its reader never drains, the live view freezes for
+//!   hours. A cut makes it reconnect.
 //!
 //! The gate dials go2rtc on the host's LAN address, not loopback: go2rtc
 //! skips RTSP auth for loopback peers, so a loopback hop would open the
@@ -35,6 +38,8 @@ const FRESH: Duration = Duration::from_secs(3);
 const SETTLE: Duration = Duration::from_secs(3);
 /// How often a session checks that its relay run is still live.
 const CHECK: Duration = Duration::from_millis(500);
+/// A viewer that takes this long to accept one write has stopped reading.
+const STALL: Duration = Duration::from_secs(10);
 
 /// The relay run viewers may join now, if any.
 fn live(health: &Health) -> Option<u64> {
@@ -89,11 +94,32 @@ async fn forward(mut viewer: TcpStream, upstream: SocketAddr, health: &Health, r
             }
         }
     };
-    tokio::select! {
-        r = tokio::io::copy_bidirectional(&mut viewer, &mut g2r) => match r {
-            Ok(_) => "closed".into(),
+    let (mut v_rd, mut v_wr) = viewer.split();
+    let (mut g_rd, mut g_wr) = g2r.split();
+    let up = async {
+        match tokio::io::copy(&mut v_rd, &mut g_wr).await {
+            Ok(_) => "closed".to_string(),
             Err(e) => format!("closed: {e}"),
-        },
+        }
+    };
+    let down = async {
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            let n = match g_rd.read(&mut buf).await {
+                Ok(0) => return "closed".to_string(),
+                Ok(n) => n,
+                Err(e) => return format!("closed: {e}"),
+            };
+            match tokio::time::timeout(STALL, v_wr.write_all(&buf[..n])).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => return format!("closed: {e}"),
+                Err(_) => return format!("viewer stopped reading for {}s: cut", STALL.as_secs()),
+            }
+        }
+    };
+    tokio::select! {
+        why = up => why,
+        why = down => why,
         why = watch => why.into(),
     }
 }
@@ -223,6 +249,52 @@ mod tests {
         health.touch();
         let n = tokio::time::timeout(Duration::from_secs(2), c.read(&mut b)).await.expect("cut in time").unwrap_or(0);
         assert_eq!(n, 0, "restart must close the viewer");
+    }
+
+    /// A viewer that stops reading is cut, while video keeps flowing.
+    #[tokio::test]
+    async fn stalled_viewer_is_cut() {
+        let health = Arc::new(Health::default());
+        health.touch();
+        // Upstream that floods every connection.
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let up_addr = upstream.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut s, _) = upstream.accept().await.unwrap();
+                tokio::spawn(async move { while s.write_all(&[0u8; 65536]).await.is_ok() {} });
+            }
+        });
+        let frames = health.clone();
+        tokio::spawn(async move {
+            loop {
+                frames.frame();
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        });
+        settle(&health).await;
+        let free = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gate_addr = free.local_addr().unwrap();
+        drop(free);
+        tokio::spawn(run(gate_addr, up_addr, health));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let mut c = TcpStream::connect(gate_addr).await.unwrap();
+        // Read nothing: buffers fill, the gate's writes block.
+        tokio::time::sleep(STALL + Duration::from_secs(3)).await;
+        let mut b = vec![0u8; 1 << 20];
+        let mut total = 0;
+        let closed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match c.read(&mut b).await {
+                    Ok(0) | Err(_) => return true,
+                    Ok(n) => total += n,
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+        assert!(closed, "stalled viewer must be cut (read {total} bytes)");
     }
 
     /// Video stopping cuts the sessions through the gate.
