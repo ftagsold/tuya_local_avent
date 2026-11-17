@@ -306,7 +306,7 @@ talk_volume: 100             # default talk gain, 0-200 %
 autohide: 5                  # hide controls after N s; 0 = always shown
 default_track: Brahms' Lullaby   # lullaby play starts this; unset = current track
 default_timer: 30 min        # set before play: 5|10|20|30|60|90 min, Forever
-default_volume: 40           # lullaby volume set before play, 0-100 %; unset = current
+default_volume: 40           # lullaby volume set before play, 30-100 %; unset = current
 overlay_bottom_left: binary_sensor.nursery_motion   # corner overlays (editor pickers)
 # overlay_bottom_right: ...
 # night_light: light.nursery_night_light   # optional overrides
