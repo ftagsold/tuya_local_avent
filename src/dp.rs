@@ -8,9 +8,7 @@ pub enum Kind {
     Switch,
     Light,     // on/off bulb; its brightness is the `Brightness` DP
     Brightness, // dimmer level of the light (part of the light entity)
-    #[allow(dead_code)] // no DP is a plain slider now
     Number,    // slider
-    Volume,    // lullaby volume: 0-100 slider, mapped onto the monitor's 30-100
     Select,    // enum
     Track,     // lullaby track picker: names out, DP 202 ids in, state from DP 248
     Timer,     // lullaby auto-stop: DP 244 seconds + DP 243 on/off as one select
@@ -52,7 +50,7 @@ pub static DPS: &[Dp] = &[
     Dp { options: TIMER_OPTIONS, ..dp(244, "lullaby_timer", "Lullaby Timer", Kind::Timer) },
     Dp { device_class: "running", on_value: "playing", writable: false, ..dp(246, "lullaby_playing", "Lullaby Playing", Kind::BinarySensor) },
     Dp { options: &["loop", "loop1", "shuffle"], ..dp(203, "play_mode", "Play Mode", Kind::Select) },
-    Dp { min: 0.0, max: 100.0, unit: "%", ..dp(VOLUME, "volume", "Volume", Kind::Volume) },
+    Dp { min: VOLUME_MIN as f64, max: 100.0, unit: "%", ..dp(VOLUME, "volume", "Volume", Kind::Number) },
     Dp { scale: 100.0, unit: "°C", device_class: "temperature", writable: false, ..dp(207, "temperature", "Temperature", Kind::Sensor) },
     dp(134, "motion_switch", "Motion Alert", Kind::Switch),
     dp(139, "sound_switch", "Sound Alert", Kind::Switch),
@@ -73,20 +71,8 @@ pub const PLAY_TRACK: u32 = 202;
 /// on the monitor, 2026-11-17): while a track plays, a write below 30 is
 /// replaced by 70 (audibly louder); while stopped it is stored, and the
 /// next play (app, card or the monitor's own button) is near silent.
-/// Home Assistant sees 0-100, spread over the usable range.
 pub const VOLUME: u32 = 209;
 pub const VOLUME_MIN: i64 = 30;
-
-/// The monitor value for a Home Assistant volume level (0-100).
-pub fn volume_to_wire(level: i64) -> i64 {
-    VOLUME_MIN + (level.clamp(0, 100) * (100 - VOLUME_MIN) + 50) / 100
-}
-
-/// The Home Assistant level (0-100) for a monitor volume; below the usable
-/// range reads as 0.
-pub fn volume_from_wire(wire: i64) -> i64 {
-    (((wire - VOLUME_MIN).max(0) * 100 + (100 - VOLUME_MIN) / 2) / (100 - VOLUME_MIN)).min(100)
-}
 
 /// The built-in tracks, in id order (also the order `next` steps through
 /// them). From aventproxy's `LULLABY_CATALOGUE`.
@@ -193,23 +179,5 @@ mod tests {
         assert_eq!(timer_option(true, 900), "10 min");
         assert_eq!(timer_option(false, 600), "Forever");
         assert_eq!(track_value(3219038, 1), r#"{"bizcode":"phi-no-bm","id":3219039}"#);
-    }
-
-    #[test]
-    fn volume_levels_span_the_usable_range() {
-        assert_eq!(volume_to_wire(0), 30);
-        assert_eq!(volume_to_wire(50), 65);
-        assert_eq!(volume_to_wire(100), 100);
-        assert_eq!(volume_to_wire(-5), 30);
-        assert_eq!(volume_to_wire(150), 100);
-        assert_eq!(volume_from_wire(30), 0);
-        assert_eq!(volume_from_wire(10), 0);
-        assert_eq!(volume_from_wire(65), 50);
-        assert_eq!(volume_from_wire(70), 57);
-        assert_eq!(volume_from_wire(100), 100);
-        // Every wire value maps back to a level that writes it again.
-        for w in VOLUME_MIN..=100 {
-            assert_eq!(volume_to_wire(volume_from_wire(w)), w);
-        }
     }
 }

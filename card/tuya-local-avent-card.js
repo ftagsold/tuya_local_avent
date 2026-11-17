@@ -49,7 +49,7 @@
  */
 
 const CARD = "tuya-local-avent-card";
-const VERSION = "1.13.0";
+const VERSION = "1.14.0";
 
 const ALL_CONTROLS = ["listen", "night_light", "lullaby", "talk", "fullscreen", "background"];
 // Controls that open a panel (toggle + slider); the rest act on tap.
@@ -87,7 +87,7 @@ const CORNERS = { overlay_bottom_left: "bottom-left", overlay_bottom_right: "bot
 // A slider value sent to an entity wins over its state for this long, or
 // until the state matches.
 const PENDING_MS = 5000;
-// Lowest usable lullaby volume on the monitor (see _volumeScale).
+// Lowest usable lullaby volume on the monitor (see _volumeRange).
 const VOLUME_MIN = 30;
 // Config defaults; the editor leaves keys at these values out of the YAML.
 const DEFAULTS = { talk_mode: "toggle", listen: false, listen_volume: 100, talk_volume: 100, autohide: 5 };
@@ -400,24 +400,11 @@ class TuyaLocalAventCard extends HTMLElement {
     return LIGHT_LEVELS.reduce((a, b) => (Math.abs(b - pct) < Math.abs(a - pct) ? b : a));
   }
 
-  // The lullaby volume as the card shows it: the monitor's own value,
-  // 30-100 (below 30 it plays near silent). An entity with minimum 0 is the
-  // bridge's 0-100 level spread over 30-100: convert both ways with the
-  // bridge's integer formulas (dp.rs), so every value round-trips exactly.
-  // An older bridge passes the monitor value through (minimum 1 or 30).
-  _volumeScale() {
+  // The lullaby volume entity's range: the monitor's own value, 30-100
+  // (the bridge refuses lower: the monitor plays it near silent).
+  _volumeRange() {
     const vol = this._state(this._entity("volume"));
-    const lo = Number(vol?.attributes.min ?? VOLUME_MIN);
-    const hi = Number(vol?.attributes.max ?? 100);
-    if (lo === 0 && hi === 100) {
-      return {
-        min: VOLUME_MIN,
-        max: 100,
-        show: (l) => VOLUME_MIN + Math.floor((Math.min(100, Math.max(0, l)) * (100 - VOLUME_MIN) + 50) / 100),
-        send: (v) => Math.min(100, Math.floor(((Math.max(VOLUME_MIN, v) - VOLUME_MIN) * 100 + (100 - VOLUME_MIN) / 2) / (100 - VOLUME_MIN))),
-      };
-    }
-    return { min: Math.min(hi, Math.max(VOLUME_MIN, lo)), max: hi, show: (v) => v, send: (v) => v };
+    return { min: Number(vol?.attributes.min ?? VOLUME_MIN), max: Number(vol?.attributes.max ?? 100) };
   }
 
   _model(key) {
@@ -447,9 +434,8 @@ class TuyaLocalAventCard extends HTMLElement {
         const st = this._state(this._entity("lullaby"));
         const playing = this._state(this._entity("lullaby_playing"));
         const vol = this._state(this._entity("volume"));
-        const { min, max, show } = this._volumeScale();
-        const raw = Number(vol?.state);
-        const n = Number.isFinite(raw) && vol?.state !== "" ? Math.min(max, Math.max(min, show(raw))) : NaN;
+        const n = Number(vol?.state);
+        const { min, max } = this._volumeRange();
         return {
           on: playing && !unavailable(playing) ? playing.state === "on" : st?.state === "play",
           disabled: gone(st),
@@ -459,7 +445,8 @@ class TuyaLocalAventCard extends HTMLElement {
                 min,
                 max,
                 step: Number(vol.attributes.step ?? 1),
-                value: Number.isFinite(n) ? n : min,
+                // A value stored below 30 (until the bridge raises it) would put the thumb off the rail.
+                value: Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : min,
                 text: Number.isFinite(n) ? `${Math.round(n)}%` : "—",
               },
         };
@@ -501,8 +488,8 @@ class TuyaLocalAventCard extends HTMLElement {
         const volume = this._entity("volume");
         const { default_timer: t, default_track: def, default_volume: dv } = this._config;
         // A volume picked while stopped wins over the default for this play.
-        const { min, max, send } = this._volumeScale();
-        const v = this._volumePicked || dv === undefined || dv === null || dv === "" ? undefined : send(Math.min(max, Math.max(min, Number(dv))));
+        const { min, max } = this._volumeRange();
+        const v = this._volumePicked || dv === undefined || dv === null || dv === "" ? undefined : Math.min(max, Math.max(min, Number(dv)));
         this._volumePicked = false;
         (t && timer ? this._call("select", "select_option", { entity_id: timer, option: t }) : Promise.resolve())
           .then(() => (v !== undefined && volume ? this._call("number", "set_value", { entity_id: volume, value: v }) : undefined))
@@ -532,7 +519,7 @@ class TuyaLocalAventCard extends HTMLElement {
         break;
       case "lullaby":
         if (!final) break;
-        this._call("number", "set_value", { entity_id: this._entity("volume"), value: this._volumeScale().send(value) });
+        this._call("number", "set_value", { entity_id: this._entity("volume"), value });
         this._volumePicked = !this._model("lullaby").on;
         break;
       case "talk":

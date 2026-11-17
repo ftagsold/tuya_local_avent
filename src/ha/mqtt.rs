@@ -5,7 +5,7 @@
 //! and state stays on the LAN; MQTT only carries it to Home Assistant.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -50,9 +50,6 @@ pub async fn run(cfg: Config, control: Control) -> Result<()> {
     let (client, mut eventloop) = AsyncClient::new(opts, 64);
     // Track-id block this monitor's catalogue uses (0 = not reported yet).
     let block = Arc::new(AtomicU32::new(0));
-    // Volume level HA last asked for (-1 = none): several levels share a
-    // monitor value, so its echo shows the asked one, not a neighbour.
-    let level = Arc::new(AtomicI64::new(-1));
 
     // Fan monitor updates onto MQTT state topics.
     let mut updates = control.subscribe();
@@ -60,7 +57,6 @@ pub async fn run(cfg: Config, control: Control) -> Result<()> {
     let dev = cfg.device_id.clone();
     let seen_block = block.clone();
     let raise = control.clone();
-    let asked = level.clone();
     tokio::spawn(async move {
         // Timer state arrives as two DPs: switch (243) and length (244).
         let (mut timer_on, mut timer_secs) = (None::<bool>, None::<i64>);
@@ -104,22 +100,14 @@ pub async fn run(cfg: Config, control: Control) -> Result<()> {
                 }
                 continue;
             }
-            if u.id == dp::VOLUME {
-                let Some(wire) = u.value.as_i64() else { continue };
-                // A volume below the usable floor (set by the app, or by an
-                // older bridge) makes the next play near silent, the
-                // monitor's own button included: raise it to the floor.
-                if wire < dp::VOLUME_MIN {
-                    tracing::info!("lullaby volume {wire} is below {}: raising it", dp::VOLUME_MIN);
-                    if let Err(e) = write_one(&raise, dp::VOLUME, json!(dp::VOLUME_MIN)).await {
-                        tracing::warn!("raise lullaby volume: {e:#}");
-                    }
+            // A volume below the usable floor (set by the app, or by an
+            // older bridge) makes the next play near silent, the monitor's
+            // own button included: raise it to the floor.
+            if u.id == dp::VOLUME && u.value.as_i64().is_some_and(|v| v < dp::VOLUME_MIN) {
+                tracing::info!("lullaby volume {} is below {}: raising it", u.value, dp::VOLUME_MIN);
+                if let Err(e) = write_one(&raise, dp::VOLUME, json!(dp::VOLUME_MIN)).await {
+                    tracing::warn!("raise lullaby volume: {e:#}");
                 }
-                let last = asked.load(Ordering::Relaxed);
-                let shown = if last >= 0 && dp::volume_to_wire(last) == wire { last } else { dp::volume_from_wire(wire) };
-                let topic = format!("{}/volume/state", base(&dev));
-                let _ = state_client.publish(topic, QoS::AtLeastOnce, true, shown.to_string()).await;
-                continue;
             }
             if let Some(d) = dp::by_id(u.id) {
                 let topic = format!("{}/{}/state", base(&dev), d.slug);
@@ -154,7 +142,7 @@ pub async fn run(cfg: Config, control: Control) -> Result<()> {
             Ok(Event::Incoming(Incoming::Publish(p))) => {
                 let topic = String::from_utf8_lossy(p.topic.as_bytes()).to_string();
                 let value = String::from_utf8_lossy(&p.payload).to_string();
-                if let Err(e) = handle_command(&cfg, &control, &block, &level, &topic, &value).await {
+                if let Err(e) = handle_command(&cfg, &control, &block, &topic, &value).await {
                     tracing::warn!("command {topic}={value} failed: {e:#}");
                 }
             }
@@ -204,7 +192,7 @@ async fn publish_discovery(client: &AsyncClient, cfg: &Config) -> Result<()> {
             Kind::Switch => ("switch", json!({ "payload_on": "true", "payload_off": "false", "command_topic": cmd_topic(cfg, d.slug) })),
             Kind::Light => ("light", light_config(cfg)),
             Kind::Brightness => continue, // part of the light
-            Kind::Number | Kind::Volume => ("number", json!({ "min": d.min, "max": d.max, "command_topic": cmd_topic(cfg, d.slug), "unit_of_measurement": d.unit })),
+            Kind::Number => ("number", json!({ "min": d.min, "max": d.max, "command_topic": cmd_topic(cfg, d.slug), "unit_of_measurement": d.unit })),
             Kind::Select | Kind::Track | Kind::Timer => ("select", json!({ "options": d.options, "command_topic": cmd_topic(cfg, d.slug) })),
             Kind::Sensor => ("sensor", json!({ "unit_of_measurement": d.unit, "device_class": d.device_class })),
             Kind::BinarySensor => {
@@ -279,13 +267,12 @@ fn state_payload(d: &dp::Dp, raw: &Value) -> String {
             Some(n) => format!("{n}"),
             None => raw.as_str().unwrap_or("").to_string(),
         },
-        Kind::Volume => raw.as_i64().map(dp::volume_from_wire).map(|l| l.to_string()).unwrap_or_default(),
         Kind::Select | Kind::Track | Kind::Timer => raw.as_str().unwrap_or("").to_string(),
     }
 }
 
 /// Turn an HA command into a DP write, with the raw value the monitor expects.
-async fn handle_command(cfg: &Config, control: &Control, block: &Arc<AtomicU32>, level: &Arc<AtomicI64>, topic: &str, value: &str) -> Result<()> {
+async fn handle_command(cfg: &Config, control: &Control, block: &Arc<AtomicU32>, topic: &str, value: &str) -> Result<()> {
     let slug = topic.strip_prefix(&format!("{}/", base(&cfg.device_id))).and_then(|s| s.strip_suffix("/set"));
     let Some(slug) = slug else { return Ok(()) };
     let Some(d) = dp::DPS.iter().find(|d| d.slug == slug) else { return Ok(()) };
@@ -299,12 +286,6 @@ async fn handle_command(cfg: &Config, control: &Control, block: &Arc<AtomicU32>,
             let Ok(n) = value.parse::<f64>() else { return Ok(()) };
             let n = if d.max > d.min { n.clamp(d.min, d.max) } else { n };
             json!((n * d.scale) as i64)
-        }
-        Kind::Volume => {
-            let Ok(n) = value.parse::<f64>() else { return Ok(()) };
-            let l = (n.round() as i64).clamp(0, 100);
-            level.store(l, Ordering::Relaxed);
-            json!(dp::volume_to_wire(l))
         }
         // HA sends 0..=brightness_scale; the monitor takes 1..=100.
         Kind::Brightness => json!(value.parse::<f64>().map(|n| n.round().clamp(d.min, d.max) as i64).unwrap_or(d.max as i64)),
